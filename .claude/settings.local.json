@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(tasklist /FI 'IMAGENAME eq python*')",
+      "Bash(dir:*)",
+      "Bash(node:*)",
+      "Bash(tasklist /V /FI \"IMAGENAME eq python.exe\")",
+      "Bash(pip show:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(curl:*)",
+      "Bash(start:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(findstr:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(\".venv/Scripts/python.exe\" -m pip list)",
+      "Bash(\".venv/Scripts/python.exe\" -m pip:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

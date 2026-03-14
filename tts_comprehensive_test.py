@@ -20,7 +20,7 @@ print("=" * 70)
 TEST_TEXT = "你好，我在测试TTS功能"
 
 # 输出目录
-OUTPUT_DIR = "E:/PycharmDemo/digital-human-web/web/media/audio"
+OUTPUT_DIR = "E:/PycharmDemo/Deepseek/digital-human-web/web/media/audio"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # =============================================================================

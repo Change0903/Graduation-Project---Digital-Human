@@ -1,1 +1,24 @@
-﻿NUL
+NUL
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+.venv-deepface/
+
+# IDE files
+.idea/
+.vscode/
+.claude/
+digital-human-web/.idea/
+digital-human-web/web/.claude/
+
+# Build outputs
+build/
+dist/
+
+# Generated media
+digital-human-web/web/media/audio/
+digital-human-web/web/media/video/

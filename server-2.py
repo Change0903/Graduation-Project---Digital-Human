@@ -20,14 +20,14 @@ client = OpenAI(
     api_key=API_KEY,
 )
 
-LLM_MODEL = "tngtech/deepseek-r1t2-chimera:free"
+LLM_MODEL = "z-ai/glm-4.5-air:free"
 
 # ========= 2. 路径配置：媒体写到 WebStorm 前端项目 =========
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ⛏⛏⛏ 只需要确认这一行：必须是 index.html 所在的目录 ⛏⛏⛏
-FRONTEND_WEB_DIR = r"E:\PycharmDemo\digital-human-web\web"
+FRONTEND_WEB_DIR = r"E:\PycharmDemo\Deepseek\digital-human-web\web"
 
 AUDIO_DIR = os.path.join(FRONTEND_WEB_DIR, "media", "audio")
 VIDEO_DIR = os.path.join(FRONTEND_WEB_DIR, "media", "video")
@@ -194,15 +194,12 @@ async def handle_user_text(websocket, text: str):
         "mode": "audio_only",
     }
 
-    # 即使TTS失败，也返回音频路径（前端可以处理404）
-    # 如果TTS成功，使用真实文件路径
-    # 如果TTS失败，使用默认音频路径
+    # TTS 成功才返回音频路径，失败时返回 null，避免前端去请求不存在文件
     if tts_success and audio_rel:
         reply_msg["audio"] = audio_rel
     else:
-        # TTS失败时，返回一个占位符音频路径
-        # 这样前端不会因为缺少audio字段而出错
-        reply_msg["audio"] = "media/audio/silent.mp3"
+        reply_msg["audio"] = None
+        reply_msg["audio_error"] = "tts_failed"
 
     await websocket.send(json.dumps(reply_msg, ensure_ascii=False))
 
@@ -240,6 +237,11 @@ async def signaling_handler(websocket):
                         "error": str(e),
                     }
                     await websocket.send(json.dumps(err_msg, ensure_ascii=False))
+            elif msg_type == "frontend_log":
+                level = str(data.get("level", "log")).upper()
+                text = str(data.get("text", "")).strip()
+                if text:
+                    print(f"[前端控制台] [{level}] {text}")
             else:
                 print("收到未知类型消息：", data)
 

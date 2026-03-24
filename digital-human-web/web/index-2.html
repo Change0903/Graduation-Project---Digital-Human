@@ -2,212 +2,465 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
-    <title>情感数字人实践 - 语音模式</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>情感数字人 - 语音模式</title>
     <style>
+        :root {
+            --bg: #07111f;
+            --panel: rgba(11, 24, 42, 0.92);
+            --panel-soft: rgba(15, 23, 42, 0.82);
+            --panel-border: rgba(148, 163, 184, 0.18);
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --accent: #22c55e;
+            --accent-2: #38bdf8;
+            --card-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+            --radius-xl: 22px;
+            --radius-lg: 18px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
         body {
             margin: 0;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #0b1020;
-            color: #f5f5f5;
-            display: flex;
-            height: 100vh;
+            width: 100%;
+            height: 100%;
         }
 
-        .left-panel {
-            flex: 2;
-            display: flex;
-            flex-direction: column;
-            border-right: 1px solid rgba(255, 255, 255, 0.08);
-            padding: 16px;
-            box-sizing: border-box;
+        body {
+            overflow: hidden;
+            font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(34, 197, 94, 0.12), transparent 30%),
+                radial-gradient(circle at top right, rgba(56, 189, 248, 0.15), transparent 28%),
+                linear-gradient(180deg, #07111f 0%, #0c172a 100%);
+            padding: 18px;
         }
 
-        .right-panel {
-            flex: 1;
-            position: relative;
-            padding: 16px;
-            box-sizing: border-box;
+        .app-shell {
+            width: 100%;
+            height: 100%;
+            display: grid;
+            grid-template-columns: minmax(320px, 370px) minmax(460px, 1fr) minmax(340px, 390px);
+            gap: 18px;
+            align-items: center;
+        }
+
+        .side-column,
+        .center-column {
+            min-height: 0;
+        }
+
+        .side-column {
+            height: min(82vh, 820px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .center-column {
+            height: min(82vh, 820px);
             display: flex;
             flex-direction: column;
+            justify-content: center;
+            gap: 16px;
+            min-width: 0;
+        }
+
+        .panel-card {
+            width: 100%;
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--card-shadow);
+            backdrop-filter: blur(14px);
+        }
+
+        .panel-inner {
+            height: 100%;
+            padding: 18px;
+        }
+
+        .mode-switch {
+            display: inline-flex;
             gap: 8px;
+            margin-bottom: 14px;
         }
 
-        h1 {
-            margin: 0 0 12px 0;
-            font-size: 20px;
-            font-weight: 600;
+        .mode-btn {
+            padding: 8px 14px;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            background: rgba(15, 23, 42, 0.72);
+            color: var(--text);
+            text-decoration: none;
+            font-size: 13px;
+            transition: 0.2s ease;
+        }
+
+        .mode-btn:hover {
+            border-color: rgba(56, 189, 248, 0.48);
+            background: rgba(30, 41, 59, 0.9);
+        }
+
+        .mode-btn.active {
+            background: linear-gradient(135deg, rgba(34, 197, 94, 0.95), rgba(56, 189, 248, 0.95));
+            border-color: transparent;
+        }
+
+        .page-title {
+            margin: 0 0 8px;
+            font-size: clamp(26px, 3vw, 34px);
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .page-subtitle {
+            margin: 0;
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.7;
+        }
+
+        .hero-card .panel-inner {
+            padding-bottom: 16px;
+        }
+
+        .conversation-card {
+            flex: 1;
+            min-height: 0;
+        }
+
+        .conversation-card .panel-inner {
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .composer-card .panel-inner {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .card-title {
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        .status-text {
+            color: var(--muted);
+            font-size: 12px;
         }
 
         .chat-window {
             flex: 1;
-            border-radius: 12px;
-            background: rgba(15, 23, 42, 0.9);
-            border: 1px solid rgba(148, 163, 184, 0.25);
-            padding: 12px;
+            min-height: 0;
+            padding-right: 6px;
             overflow-y: auto;
         }
 
+        .chat-window::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .chat-window::-webkit-scrollbar-thumb {
+            border-radius: 999px;
+            background: rgba(100, 116, 139, 0.35);
+        }
+
         .msg {
-            margin-bottom: 8px;
-            line-height: 1.4;
-            border-radius: 15px;
-            padding: 10px;
-            max-width: 60%;
-            word-wrap: break-word;
+            margin-bottom: 10px;
+            padding: 12px 14px;
+            border-radius: 18px;
+            max-width: 74%;
+            line-height: 1.6;
+            word-break: break-word;
         }
 
         .msg.user {
-            background-color: #4caf50;
-            color: white;
             margin-left: auto;
-            text-align: right;
+            background: linear-gradient(135deg, #10b981, #22c55e);
+            color: white;
         }
 
         .msg.bot {
-            background-color: #2196f3;
+            background: linear-gradient(135deg, #0ea5e9, #2563eb);
             color: white;
         }
 
         .input-bar {
             display: flex;
-            margin-top: 12px;
-            gap: 8px;
+            gap: 10px;
         }
 
         #userText {
             flex: 1;
+            min-width: 0;
+            border: 1px solid rgba(148, 163, 184, 0.24);
             border-radius: 999px;
-            border: 1px solid rgba(148, 163, 184, 0.5);
-            padding: 8px 14px;
             background: rgba(15, 23, 42, 0.85);
-            color: #f9fafb;
+            color: var(--text);
+            padding: 12px 16px;
+            font-size: 14px;
             outline: none;
         }
 
         #userText:focus {
-            border-color: #38bdf8;
+            border-color: rgba(56, 189, 248, 0.72);
         }
 
-        #sendBtn,
-        #voiceBtn {
-            border-radius: 999px;
+        button {
             border: none;
-            padding: 8px 14px;
-            background: linear-gradient(135deg, #38bdf8, #6366f1);
-            color: white;
+            border-radius: 999px;
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 600;
             cursor: pointer;
-            font-weight: 500;
-            white-space: nowrap;
+            color: white;
+            transition: transform 0.15s ease, opacity 0.15s ease;
         }
 
-        #sendBtn:active,
-        #voiceBtn:active {
+        button:active {
             transform: scale(0.98);
         }
 
-        .avatar-card {
-            flex: 1;
-            border-radius: 16px;
-            background: radial-gradient(circle at top, rgba(56, 189, 248, 0.15), transparent 50%),
-            rgba(15, 23, 42, 0.95);
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            padding: 10px;
-            box-sizing: border-box;
+        #sendBtn {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+        }
+
+        #voiceBtn {
+            background: linear-gradient(135deg, #0ea5e9, #2563eb);
+        }
+
+        .emotion-card .panel-inner,
+        .avatar-card .panel-inner {
             display: flex;
             flex-direction: column;
-            gap: 6px;
         }
 
-        .avatar-header {
+        .emotion-preview {
+            position: relative;
+            overflow: hidden;
+            border-radius: var(--radius-lg);
+            background: #020617;
+            margin-bottom: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            align-self: center;
+            width: 100%;
+        }
+
+        #emotionVideo {
+            width: 100%;
+            height: 250px;
+            display: block;
+            object-fit: cover;
+            background: #020617;
+            transform: scaleX(-1);
+        }
+
+        .emotion-badge {
+            position: absolute;
+            left: 12px;
+            bottom: 12px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 12px;
+            color: #e2e8f0;
+        }
+
+        .emotion-summary {
+            margin-bottom: 12px;
+            color: #dbeafe;
             font-size: 14px;
-            color: #e5e7eb;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            font-weight: 600;
+            line-height: 1.6;
         }
 
-        .avatar-header span.label {
-            font-weight: 600;
+        .emotion-bars {
+            display: grid;
+            gap: 10px;
+            align-content: start;
+        }
+
+        .emotion-row {
+            display: grid;
+            grid-template-columns: 70px 1fr 48px;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .emotion-label,
+        .emotion-value {
+            font-size: 12px;
+            color: #e2e8f0;
+        }
+
+        .emotion-track {
+            height: 8px;
+            border-radius: 999px;
+            background: rgba(100, 116, 139, 0.3);
+            overflow: hidden;
+        }
+
+        .emotion-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #38bdf8, #22c55e);
+            transition: width 0.18s ease;
+        }
+
+        .avatar-stage {
+            height: min(72vh, 720px);
+            overflow: hidden;
+            border-radius: var(--radius-lg);
+            background:
+                radial-gradient(circle at top, rgba(56, 189, 248, 0.14), transparent 48%),
+                #020617;
+            border: 1px solid rgba(148, 163, 184, 0.14);
         }
 
         #avatarVideo {
             width: 100%;
             height: 100%;
-            max-height: 320px;
-            border-radius: 12px;
-            background: #020617;
+            min-height: 0;
+            display: block;
             object-fit: cover;
+            background: #020617;
+            border-radius: var(--radius-lg);
         }
 
-        .status-bar {
-            font-size: 12px;
-            color: #9ca3af;
+        @media (max-width: 1280px) {
+            .app-shell {
+                grid-template-columns: minmax(280px, 320px) minmax(400px, 1fr) minmax(300px, 340px);
+            }
         }
 
-        .mode-switch {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 12px;
-        }
+        @media (max-width: 1080px) {
+            body {
+                overflow: auto;
+                padding: 14px;
+            }
 
-        .mode-btn {
-            padding: 6px 12px;
-            border-radius: 8px;
-            border: 1px solid rgba(148, 163, 184, 0.5);
-            background: rgba(15, 23, 42, 0.85);
-            color: #f9fafb;
-            cursor: pointer;
-            font-size: 12px;
-            text-decoration: none;
-            transition: all 0.3s;
-        }
+            .app-shell {
+                height: auto;
+                grid-template-columns: 1fr;
+                align-items: stretch;
+            }
 
-        .mode-btn:hover {
-            border-color: #38bdf8;
-            background: rgba(56, 189, 248, 0.1);
-        }
+            .side-column,
+            .center-column {
+                height: auto;
+            }
 
-        .mode-btn.active {
-            background: linear-gradient(135deg, #38bdf8, #6366f1);
-            border-color: transparent;
-        }
+            .side-column {
+                order: 2;
+            }
 
-        .speed-badge {
-            background: #10b981;
-            color: white;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-weight: 600;
+            .center-column {
+                order: 1;
+            }
+
+            .right-avatar {
+                order: 3;
+            }
+
+            #avatarVideo {
+                min-height: 320px;
+            }
         }
     </style>
 </head>
 <body>
-<div class="left-panel">
-    <div class="mode-switch">
-        <a href="index.html" class="mode-btn">视频模式</a>
-        <a href="index-2.html" class="mode-btn active">语音模式 <span class="speed-badge">快</span></a>
+<div class="app-shell">
+    <div class="side-column">
+        <div class="panel-card emotion-card">
+            <div class="panel-inner">
+                <div class="card-header">
+                    <span class="card-title">实时情绪识别</span>
+                    <span id="emotionStatus" class="status-text">正在准备摄像头...</span>
+                </div>
+
+                <div class="emotion-preview">
+                    <video id="emotionVideo" autoplay muted playsinline></video>
+                    <div id="emotionBadge" class="emotion-badge">等待识别</div>
+                </div>
+
+                <div id="emotionSummary" class="emotion-summary">当前主情绪：等待识别</div>
+                <div id="emotionBars" class="emotion-bars"></div>
+            </div>
+        </div>
     </div>
-    <h1>情感数字人实践 - 语音模式</h1>
-    <div id="chatWindow" class="chat-window"></div>
-    <div class="input-bar">
-        <input id="userText" placeholder="对数字人说点什么..." />
-        <button id="voiceBtn">🎤 说话</button>
-        <button id="sendBtn">发送</button>
+
+    <div class="center-column">
+        <div class="panel-card hero-card">
+            <div class="panel-inner">
+                <div class="mode-switch">
+                    <a href="index.html" class="mode-btn">视频模式</a>
+                    <a href="index-2.html" class="mode-btn active">语音模式</a>
+                </div>
+
+                <div>
+                    <h1 class="page-title">情感数字人</h1>
+                    <p class="page-subtitle">语音模式实时交互界面</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-card conversation-card">
+            <div class="panel-inner">
+                <div class="card-header">
+                    <span class="card-title">对话记录</span>
+                    <span class="status-text">支持打字与语音交互</span>
+                </div>
+                <div id="chatWindow" class="chat-window"></div>
+            </div>
+        </div>
+
+        <div class="panel-card composer-card">
+            <div class="panel-inner">
+                <div class="input-bar">
+                    <input id="userText" placeholder="对数字人说点什么..." />
+                    <button id="voiceBtn">说话</button>
+                    <button id="sendBtn">发送</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="side-column right-avatar">
+        <div class="panel-card avatar-card">
+            <div class="panel-inner">
+                <div class="card-header">
+                    <span class="card-title">数字人</span>
+                    <span id="statusText" class="status-text">等待你的第一句话...</span>
+                </div>
+
+                <div class="avatar-stage">
+                    <video id="avatarVideo" muted playsinline></video>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
-<div class="right-panel">
-    <div class="avatar-card">
-        <div class="avatar-header">
-            <span class="label">数字人</span>
-            <span id="statusText" class="status-bar">等待你的第一句话...</span>
-        </div>
-        <!-- 初始静态图片会由 JS 设置为 avatar.png -->
-        <video id="avatarVideo" muted playsinline></video>
-    </div>
-    <audio id="replyAudio"></audio>
-</div>
+<audio id="replyAudio"></audio>
 
 <script src="main.js"></script>
 </body>

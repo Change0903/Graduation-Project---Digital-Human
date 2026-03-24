@@ -1,23 +1,44 @@
-// main.js - 单轮对话模式
-
-// ===== 1. DOM 引用 =====
-const chatWindow = document.getElementById("chatWindow");
+﻿const chatWindow = document.getElementById("chatWindow");
 const userTextInput = document.getElementById("userText");
 const sendBtn = document.getElementById("sendBtn");
 const voiceBtn = document.getElementById("voiceBtn");
 const avatarVideo = document.getElementById("avatarVideo");
 const replyAudio = document.getElementById("replyAudio");
 const statusText = document.getElementById("statusText");
+const emotionVideo = document.getElementById("emotionVideo");
+const emotionStatus = document.getElementById("emotionStatus");
+const emotionBadge = document.getElementById("emotionBadge");
+const emotionSummary = document.getElementById("emotionSummary");
+const emotionBars = document.getElementById("emotionBars");
 
-// ===== 2. 对话状态控制 =====
-let conversationState = "idle"; // idle | listening | ai_thinking | ai_speaking
+const EMOTION_LABELS = {
+    happy: "开心",
+    neutral: "平静",
+    surprise: "惊讶",
+    sad: "悲伤",
+    angry: "愤怒",
+    fear: "害怕",
+    disgust: "厌恶",
+};
+const EMOTION_ORDER = ["happy", "neutral", "surprise", "sad", "angry", "fear", "disgust"];
+const EMOTION_CAPTURE_INTERVAL_MS = 450;
+const EMOTION_REQUEST_TIMEOUT_MS = 6000;
+
+let conversationState = "idle";
 let recognition = null;
 let recognizing = false;
-let callActive = false; // 是否在通话中（隐藏按钮逻辑）
-let buttonLocked = false; // 按钮防抖锁
+let callActive = false;
+let buttonLocked = false;
 let socket = null;
 
-// ===== 2.1. 前端控制台日志上报 =====
+let emotionStream = null;
+let emotionCaptureTimer = null;
+let emotionRequestInFlight = false;
+let emotionLastRequestAt = 0;
+const emotionCanvas = document.createElement("canvas");
+const emotionContext = emotionCanvas.getContext("2d");
+const emotionBarRefs = new Map();
+
 const MAX_PENDING_FRONTEND_LOGS = 200;
 const pendingFrontendLogs = [];
 const rawConsole = {
@@ -33,29 +54,25 @@ function stringifyLogArg(arg) {
     if (arg instanceof Error) return arg.stack || arg.message || String(arg);
     try {
         return JSON.stringify(arg);
-    } catch (_e) {
+    } catch (_error) {
         return String(arg);
     }
 }
 
-function buildFrontendLogPayload(level, args) {
-    return {
+function queueFrontendLog(level, args) {
+    const payload = {
         type: "frontend_log",
-        level: level,
+        level,
         text: args.map(stringifyLogArg).join(" "),
     };
-}
-
-function queueFrontendLog(level, args) {
-    const payload = buildFrontendLogPayload(level, args);
     if (!payload.text.trim()) return;
 
     if (socket && socket.readyState === WebSocket.OPEN) {
         try {
             socket.send(JSON.stringify(payload));
             return;
-        } catch (_e) {
-            // 发送失败时进入队列，等待下次连接恢复后再发
+        } catch (_error) {
+            // 发送失败时进入队列，等待连接恢复
         }
     }
 
@@ -95,136 +112,294 @@ window.addEventListener("unhandledrejection", (event) => {
     queueFrontendLog("error", ["[unhandledrejection]", stringifyLogArg(event.reason)]);
 });
 
-// 页面加载
-window.addEventListener("load", () => {
-    console.log("[前端] 页面加载完成");
-    avatarVideo.poster = "avatar.png";
-    initSpeechRecognition();
-    updateStatus("可打字发送，或点击🎤开始语音通话");
-});
-
-// ===== 3. WebSocket 连接 =====
-const wsUrl = "ws://localhost:9998";
-socket = new WebSocket(wsUrl);
-
-// 连接建立
-socket.onopen = () => {
-    console.log("[前端] ✅ WebSocket 已连接");
-    socket.send(JSON.stringify({
-        type: "join",
-        role: "web_client"
-    }));
-    flushFrontendLogs();
-};
-
-// 收到消息
-socket.onmessage = (event) => {
-    let data;
-    try {
-        data = JSON.parse(event.data);
-    } catch (e) {
-        console.log("[前端] 收到非 JSON 消息：", event.data);
-        return;
-    }
-
-    if (data.type === "server_reply") {
-        console.log("[前端] 服务器回复：", data.text);
-    } else if (data.type === "bot_reply") {
-        const text = data.text || "";
-        const audioPath = data.audio;
-
-        console.log("[前端] 收到AI回复：", text);
-
-        // 添加消息到聊天窗口
-        appendMessage("bot", text);
-
-        // 开始播放AI音频
-        if (audioPath) {
-            playAiAudio(audioPath);
-        } else {
-            console.log("[前端] 本次回复没有音频，跳过播放");
-            conversationState = "idle";
-            updateStatus("收到文本回复（本次无音频）");
-            if (callActive) {
-                setTimeout(() => {
-                    startNextListeningCycle();
-                }, 500);
-            }
-        }
-    }
-};
-
-// 连接关闭
-socket.onclose = () => {
-    console.log("[前端] 🔌 WebSocket 已关闭");
-    updateStatus("连接已断开");
-};
-
-// 连接错误
-socket.onerror = (err) => {
-    console.log("[前端] ❌ WebSocket 出错：", err);
-    updateStatus("连接出错");
-};
-
-// ===== 4. 状态更新函数 =====
 function updateStatus(message) {
     statusText.textContent = message;
 }
 
-// ===== 5. 播放AI音频 =====
-function playAiAudio(audioPath) {
-    console.log("[前端] 🎵 开始播放AI音频：", audioPath);
-    updateStatus("AI正在说话...");
+function appendMessage(role, text) {
+    const div = document.createElement("div");
+    div.className = `msg ${role}`;
+    div.textContent = `${role === "user" ? "你" : "数字人"}：${text}`;
+    chatWindow.appendChild(div);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+}
 
+function createEmotionRows() {
+    emotionBars.innerHTML = "";
+    EMOTION_ORDER.forEach((emotionKey) => {
+        const row = document.createElement("div");
+        row.className = "emotion-row";
+
+        const label = document.createElement("div");
+        label.className = "emotion-label";
+        label.textContent = EMOTION_LABELS[emotionKey];
+
+        const track = document.createElement("div");
+        track.className = "emotion-track";
+
+        const fill = document.createElement("div");
+        fill.className = "emotion-fill";
+        track.appendChild(fill);
+
+        const value = document.createElement("div");
+        value.className = "emotion-value";
+        value.textContent = "0.0%";
+
+        row.appendChild(label);
+        row.appendChild(track);
+        row.appendChild(value);
+        emotionBars.appendChild(row);
+
+        emotionBarRefs.set(emotionKey, {fill, value});
+    });
+}
+
+function getQualityText(reason) {
+    const qualityTextMap = {
+        ok: "画面稳定",
+        too_dark: "画面偏暗",
+        too_bright: "画面偏亮",
+        too_blurry: "画面偏模糊",
+        no_face: "未检测到人脸",
+        waiting: "等待识别",
+    };
+    return qualityTextMap[reason] || "识别中";
+}
+
+function updateEmotionStatus(message) {
+    emotionStatus.textContent = message;
+}
+
+function resetEmotionPanel(message = "等待识别") {
+    emotionBadge.textContent = message;
+    emotionSummary.textContent = `当前主情绪：${message}`;
+    EMOTION_ORDER.forEach((emotionKey) => {
+        const refs = emotionBarRefs.get(emotionKey);
+        if (!refs) return;
+        refs.fill.style.width = "0%";
+        refs.value.textContent = "0.0%";
+    });
+}
+
+function renderEmotionResult(data) {
+    emotionRequestInFlight = false;
+    const scores = data.scores || {};
+    const hasFace = Boolean(data.has_face);
+
+    if (!hasFace) {
+        updateEmotionStatus("未检测到稳定人脸，请保持正对摄像头");
+        resetEmotionPanel("未检测到人脸");
+        return;
+    }
+
+    const dominant = data.dominant_emotion || "neutral";
+    const dominantLabel = EMOTION_LABELS[dominant] || dominant;
+    emotionBadge.textContent = `主情绪：${dominantLabel}`;
+    emotionSummary.textContent = `当前主情绪：${dominantLabel}`;
+
+    const qualityText = getQualityText(data.quality_reason);
+    const brightness = Number(data.brightness || 0).toFixed(0);
+    const sharpness = Number(data.sharpness || 0).toFixed(0);
+    updateEmotionStatus(`${qualityText} | 亮度 ${brightness} | 清晰度 ${sharpness}`);
+
+    EMOTION_ORDER.forEach((emotionKey) => {
+        const refs = emotionBarRefs.get(emotionKey);
+        if (!refs) return;
+        const rawValue = Number(scores[emotionKey] || 0);
+        const width = Math.max(0, Math.min(rawValue, 100));
+        refs.fill.style.width = `${width}%`;
+        refs.value.textContent = `${rawValue.toFixed(1)}%`;
+    });
+}
+
+async function startEmotionCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        updateEmotionStatus("当前浏览器不支持摄像头调用");
+        resetEmotionPanel("浏览器不支持");
+        return;
+    }
+
+    try {
+        emotionStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: "user",
+                width: {ideal: 640},
+                height: {ideal: 480},
+            },
+            audio: false,
+        });
+        emotionVideo.srcObject = emotionStream;
+        await emotionVideo.play();
+        updateEmotionStatus("摄像头已开启，正在分析中...");
+        console.log("[前端] 情绪识别摄像头已开启");
+
+        if (emotionCaptureTimer) {
+            clearInterval(emotionCaptureTimer);
+        }
+        emotionCaptureTimer = window.setInterval(captureEmotionFrame, EMOTION_CAPTURE_INTERVAL_MS);
+    } catch (error) {
+        console.error("[前端] 摄像头启动失败：", error);
+        updateEmotionStatus("摄像头启动失败，请检查浏览器权限");
+        resetEmotionPanel("摄像头未授权");
+    }
+}
+
+function stopEmotionCamera() {
+    if (emotionCaptureTimer) {
+        clearInterval(emotionCaptureTimer);
+        emotionCaptureTimer = null;
+    }
+    if (emotionStream) {
+        emotionStream.getTracks().forEach((track) => track.stop());
+        emotionStream = null;
+    }
+}
+
+function captureEmotionFrame() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!emotionStream || document.hidden) return;
+    if (!emotionVideo.videoWidth || !emotionVideo.videoHeight) return;
+
+    if (emotionRequestInFlight) {
+        if (Date.now() - emotionLastRequestAt > EMOTION_REQUEST_TIMEOUT_MS) {
+            emotionRequestInFlight = false;
+            updateEmotionStatus("情绪识别请求超时，已自动重试");
+        } else {
+            return;
+        }
+    }
+
+    const targetWidth = 320;
+    const targetHeight = Math.round((emotionVideo.videoHeight / emotionVideo.videoWidth) * targetWidth);
+    emotionCanvas.width = targetWidth;
+    emotionCanvas.height = targetHeight;
+    emotionContext.drawImage(emotionVideo, 0, 0, targetWidth, targetHeight);
+
+    const dataUrl = emotionCanvas.toDataURL("image/jpeg", 0.72);
+    const imageBase64 = dataUrl.split(",")[1];
+    if (!imageBase64) return;
+
+    emotionRequestInFlight = true;
+    emotionLastRequestAt = Date.now();
+    socket.send(JSON.stringify({
+        type: "emotion_frame",
+        image: imageBase64,
+    }));
+}
+
+function connectWebSocket() {
+    const wsUrl = "ws://localhost:9998";
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+        console.log("[前端] WebSocket 已连接");
+        socket.send(JSON.stringify({
+            type: "join",
+            role: "web_client",
+        }));
+        flushFrontendLogs();
+    };
+
+    socket.onmessage = (event) => {
+        let data;
+        try {
+            data = JSON.parse(event.data);
+        } catch (_error) {
+            console.log("[前端] 收到非 JSON 消息：", event.data);
+            return;
+        }
+
+        if (data.type === "server_reply") {
+            console.log("[前端] 服务器回复：", data.text);
+            return;
+        }
+
+        if (data.type === "bot_reply") {
+            const text = data.text || "";
+            const audioPath = data.audio;
+            console.log("[前端] 收到AI回复：", text);
+            appendMessage("bot", text);
+
+            if (audioPath) {
+                playAiAudio(audioPath);
+            } else {
+                console.log("[前端] 本次回复没有音频，跳过播放");
+                conversationState = "idle";
+                updateStatus("收到文本回复（本次无音频）");
+                if (callActive) {
+                    setTimeout(startNextListeningCycle, 500);
+                }
+            }
+            return;
+        }
+
+        if (data.type === "emotion_result") {
+            renderEmotionResult(data);
+            return;
+        }
+
+        if (data.type === "emotion_error") {
+            emotionRequestInFlight = false;
+            console.error("[前端] 情绪识别失败：", data.error);
+            updateEmotionStatus(`情绪识别失败：${data.error}`);
+            return;
+        }
+    };
+
+    socket.onclose = () => {
+        console.log("[前端] WebSocket 已关闭");
+        emotionRequestInFlight = false;
+        updateStatus("连接已断开");
+        updateEmotionStatus("后端连接已断开，情绪识别暂停");
+    };
+
+    socket.onerror = (error) => {
+        console.error("[前端] WebSocket 出错：", error);
+        updateStatus("连接出错");
+    };
+}
+
+function playAiAudio(audioPath) {
+    console.log("[前端] 开始播放AI音频：", audioPath);
+    updateStatus("AI正在说话...");
     conversationState = "ai_speaking";
     recognizing = false;
 
     replyAudio.src = audioPath;
-    replyAudio.play().catch(err => {
-        console.log("[前端] 音频播放失败：", err);
+    replyAudio.play().catch((error) => {
+        console.error("[前端] 音频播放失败：", error);
+        conversationState = "idle";
         if (callActive) {
-            conversationState = "idle";
             startNextListeningCycle();
         } else {
-            conversationState = "idle";
             updateStatus("播放失败，请重试发送");
         }
     });
 
-    // 音频播放结束事件
     replyAudio.onended = () => {
-        console.log("[前端] ✅ AI音频播放完毕");
+        console.log("[前端] AI音频播放完毕");
         if (callActive) {
-            console.log("[前端] 🔄 通话中，自动开启下一轮对话");
+            console.log("[前端] 通话中，自动开启下一轮对话");
             conversationState = "idle";
-            // 延迟1秒后自动开始下一轮对话（隐藏逻辑）
-            setTimeout(() => {
-                startNextListeningCycle();
-            }, 1000);
+            setTimeout(startNextListeningCycle, 1000);
         } else {
             conversationState = "idle";
-            updateStatus("回复结束，可继续打字或点击🎤语音");
+            updateStatus("回复结束，可继续打字或点击语音");
         }
     };
 }
 
-// ===== 5.1. 自动开始下一轮对话循环 =====
 function startNextListeningCycle() {
     if (!callActive) {
-        console.log("[前端] ⏹️ 通话已挂断，停止自动循环");
+        console.log("[前端] 通话已挂断，停止自动循环");
         return;
     }
-
-    // 确保不在AI说话或其他状态时启动
     if (conversationState !== "idle") {
-        console.log("[前端] ⏳ 当前状态不适合启动ASR：", conversationState);
+        console.log("[前端] 当前状态不适合启动ASR：", conversationState);
         return;
     }
-
-    // 确保ASR没有在运行
     if (recognizing) {
-        console.log("[前端] ⏳ ASR正在运行中，等待结束后重试");
-        // 延迟重试
+        console.log("[前端] ASR 正在运行中，稍后重试");
         setTimeout(() => {
             if (callActive && conversationState === "idle") {
                 startNextListeningCycle();
@@ -233,18 +408,17 @@ function startNextListeningCycle() {
         return;
     }
 
-    console.log("[前端] 🎤 自动启动语音识别（通话中）");
+    console.log("[前端] 自动启动语音识别（通话中）");
     conversationState = "listening";
-    updateStatus("通话中... 请开始说话");
+    updateStatus("通话中，请开始说话...");
     recognizing = true;
 
     try {
         recognition.start();
-    } catch (err) {
-        console.log("[前端] ❌ 自动启动ASR失败：", err);
+    } catch (error) {
+        console.error("[前端] 自动启动 ASR 失败：", error);
         recognizing = false;
         conversationState = "idle";
-        // 失败后延迟重试
         setTimeout(() => {
             if (callActive && conversationState === "idle" && !recognizing) {
                 startNextListeningCycle();
@@ -253,34 +427,30 @@ function startNextListeningCycle() {
     }
 }
 
-// ===== 5.2. 挂断通话 =====
 function hangUpCall() {
-    console.log("[前端] 📞 挂断通话");
+    console.log("[前端] 挂断通话");
     callActive = false;
 
-    // 立即停止当前ASR
     if (recognizing && recognition) {
         try {
             recognition.stop();
-            recognizing = false;
-        } catch (e) {
-            console.log("[前端] 停止ASR时出现异常：", e);
+        } catch (error) {
+            console.log("[前端] 停止 ASR 时出现异常：", error);
         }
+        recognizing = false;
     }
 
     conversationState = "idle";
-    voiceBtn.textContent = "🎤 语音";
+    voiceBtn.textContent = "说话";
     updateStatus("通话已挂断");
 }
 
-// ===== 6. 初始化语音识别 =====
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
     if (!SpeechRecognition) {
         console.log("[前端] 当前浏览器不支持 Web Speech API 语音识别");
         voiceBtn.disabled = true;
-        voiceBtn.textContent = "语音不支持";
+        voiceBtn.textContent = "语音不可用";
         return;
     }
 
@@ -292,166 +462,151 @@ function initSpeechRecognition() {
     recognition.onstart = () => {
         recognizing = true;
         conversationState = "listening";
-        console.log("[前端] 🎤 开始语音识别");
-
-        if (callActive) {
-            voiceBtn.textContent = "📞 挂断";
-            updateStatus("通话中... 请开始说话");
-        } else {
-            voiceBtn.textContent = "🎤 监听中...";
-            updateStatus("正在听你说话...");
-        }
+        console.log("[前端] 开始语音识别");
+        voiceBtn.textContent = callActive ? "挂断" : "监听中";
+        updateStatus(callActive ? "通话中，请开始说话..." : "正在听你说话...");
     };
 
     recognition.onresult = (event) => {
-        if (!event.results || !event.results[0] || !event.results[0][0]) return;
-
-        const transcript = event.results[0][0].transcript;
-        console.log("[前端] 🎤 识别结果：", transcript);
-
+        const transcript = event.results?.[0]?.[0]?.transcript;
+        if (!transcript) return;
+        console.log("[前端] 识别结果：", transcript);
         userTextInput.value = transcript;
-
-        // 识别完成后立即发送
         sendUserText();
     };
 
     recognition.onerror = (event) => {
-        console.log("[前端] ❌ 语音识别错误：", event.error);
+        console.log("[前端] 语音识别错误：", event.error);
         recognizing = false;
 
         if (callActive) {
-            // 通话中出错，延迟重试
             conversationState = "idle";
             setTimeout(() => {
                 if (callActive && !recognizing) {
-                    console.log("[前端] 🔄 通话中，自动重试ASR");
+                    console.log("[前端] 通话中，自动重试 ASR");
                     startNextListeningCycle();
                 }
             }, 1000);
-        } else {
-            // 未通话，显示错误状态
-            conversationState = "idle";
-            voiceBtn.textContent = "🎤 语音";
-            updateStatus("语音识别出错，请重试");
+            return;
         }
+
+        conversationState = "idle";
+        voiceBtn.textContent = "说话";
+        updateStatus("语音识别出错，请重试");
     };
 
     recognition.onend = () => {
-        console.log("[前端] 🎤 语音识别结束");
+        console.log("[前端] 语音识别结束");
         recognizing = false;
 
-        // 如果在通话中且不是AI说话状态，自动重试
         if (callActive && conversationState === "listening") {
             conversationState = "idle";
             setTimeout(() => {
                 if (callActive && !recognizing && conversationState === "idle") {
-                    console.log("[前端] 🔄 通话中，自动重启ASR");
+                    console.log("[前端] 通话中，自动重启 ASR");
                     startNextListeningCycle();
                 }
             }, 500);
-        } else if (!callActive) {
-            // 未通话，恢复按钮状态
-            voiceBtn.textContent = "🎤 语音";
+            return;
+        }
+
+        if (!callActive) {
+            voiceBtn.textContent = "说话";
             conversationState = "idle";
         }
     };
 }
 
-// ===== 7. 发送用户文本 =====
 function sendUserText() {
     const text = userTextInput.value.trim();
     if (!text) return;
 
-    console.log("[前端] 📤 发送用户消息：", text);
-
-    // 添加消息到聊天窗口
+    console.log("[前端] 发送用户消息：", text);
     appendMessage("user", text);
     userTextInput.value = "";
 
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
             type: "user_text",
-            text: text
+            text,
         }));
-        updateStatus("AI正在思考...");
+        updateStatus("AI 正在思考...");
         conversationState = "ai_thinking";
-    } else {
-        appendMessage("bot", "WebSocket 未连接，无法发送消息。");
-        conversationState = "idle";
-    }
-}
-
-// ===== 8. 语音按钮点击事件 =====
-voiceBtn.addEventListener("click", () => {
-    // 防抖：防止快速点击
-    if (buttonLocked) {
-        console.log("[前端] ⏸️ 按钮已锁定，请稍后再试");
         return;
     }
 
+    appendMessage("bot", "WebSocket 未连接，无法发送消息。");
+    conversationState = "idle";
+}
+
+voiceBtn.addEventListener("click", () => {
+    if (buttonLocked) {
+        console.log("[前端] 按钮已锁定，请稍后再试");
+        return;
+    }
     if (!recognition) {
-        console.log("[前端] ❌ 语音识别未初始化");
+        console.log("[前端] 语音识别未初始化");
         return;
     }
 
     if (!callActive) {
-        // ===== 开始通话 =====
-        buttonLocked = true; // 锁定按钮
-        console.log("[前端] 📞 开始通话");
+        buttonLocked = true;
+        console.log("[前端] 开始通话");
 
-        // 先彻底停止任何残留的ASR
         if (recognizing && recognition) {
             try {
                 recognition.stop();
-            } catch (e) {
-                // 忽略错误
+            } catch (_error) {
+                // 忽略残留状态
             }
         }
+
         recognizing = false;
         conversationState = "idle";
-
         callActive = true;
-        voiceBtn.textContent = "📞 挂断";
+        voiceBtn.textContent = "挂断";
         updateStatus("正在接通...");
 
-        // 自动启动第一轮对话
         setTimeout(() => {
             if (callActive) {
                 startNextListeningCycle();
             }
-            buttonLocked = false; // 释放按钮锁
-        }, 500);
-    } else {
-        // ===== 挂断通话 =====
-        buttonLocked = true; // 锁定按钮
-        console.log("[前端] 📞 用户点击挂断");
-        hangUpCall();
-
-        // 延迟释放按钮锁
-        setTimeout(() => {
             buttonLocked = false;
-        }, 1000);
+        }, 500);
+        return;
     }
+
+    buttonLocked = true;
+    console.log("[前端] 用户点击挂断");
+    hangUpCall();
+    setTimeout(() => {
+        buttonLocked = false;
+    }, 1000);
 });
 
-// ===== 9. 发送按钮点击事件（保留备用） =====
-sendBtn.addEventListener("click", () => {
-    sendUserText();
-});
+sendBtn.addEventListener("click", sendUserText);
 
-// ===== 10. 回车发送（保留备用） =====
-userTextInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-        e.preventDefault();
+userTextInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+        event.preventDefault();
         sendUserText();
     }
 });
 
-// ===== 11. 添加聊天消息 =====
-function appendMessage(role, text) {
-    const div = document.createElement("div");
-    div.className = `msg ${role}`;
-    div.textContent = (role === "user" ? "你：" : "数字人：") + text;
-    chatWindow.appendChild(div);
-    chatWindow.scrollTop = chatWindow.scrollHeight;
-}
+window.addEventListener("load", async () => {
+    console.log("[前端] 页面加载完成");
+    avatarVideo.poster = "avatar.png";
+    createEmotionRows();
+    resetEmotionPanel();
+    initSpeechRecognition();
+    updateStatus("可打字发送，或点击语音开始通话");
+    connectWebSocket();
+    await startEmotionCamera();
+});
+
+window.addEventListener("beforeunload", () => {
+    stopEmotionCamera();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+    }
+});

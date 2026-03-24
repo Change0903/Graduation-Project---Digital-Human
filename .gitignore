@@ -8,6 +8,9 @@ __pycache__/
 .venv/
 .venv-deepface/
 
+# Local toolchains
+tools/
+
 # IDE files
 .idea/
 .vscode/
@@ -22,3 +25,6 @@ dist/
 # Generated media
 digital-human-web/web/media/audio/
 digital-human-web/web/media/video/
+
+# DeepFace cache
+emotion/.deepface/

@@ -1,213 +1,223 @@
-import os
-import sys
+﻿from __future__ import annotations
+
 import asyncio
 import json
-import time
+import os
 import re
-import subprocess
+import time
+import uuid
+from pathlib import Path
 
+import edge_tts
 import websockets
 from openai import OpenAI
-import edge_tts
 
-# ========= 1. OpenRouter / DeepSeek 配置 =========
+from emotion.worker_client import EmotionWorkerClient
+
+
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
     raise RuntimeError("没有读取到 OPENROUTER_API_KEY，请先在环境变量中设置。")
+
+BASE_DIR = Path(__file__).resolve().parent
+CONFIGURED_FRONTEND_WEB_DIR = Path(r"E:\PycharmDemo\Deepseek\digital-human-web\web")
+FALLBACK_FRONTEND_WEB_DIR = BASE_DIR / "digital-human-web" / "web"
+VOICE = "zh-CN-XiaoxiaoNeural"
+LLM_MODEL = "z-ai/glm-4.5-air:free"
+HTTP_REFERER = os.getenv("OPENROUTER_SITE_URL", "https://your-site-url.com")
+SITE_TITLE = os.getenv("OPENROUTER_SITE_TITLE", "Digital Human Demo")
+
+
+def resolve_frontend_web_dir() -> Path:
+    if CONFIGURED_FRONTEND_WEB_DIR.exists():
+        return CONFIGURED_FRONTEND_WEB_DIR
+    return FALLBACK_FRONTEND_WEB_DIR
+
+
+FRONTEND_WEB_DIR = resolve_frontend_web_dir()
+AUDIO_DIR = FRONTEND_WEB_DIR / "media" / "audio"
+VIDEO_DIR = FRONTEND_WEB_DIR / "media" / "video"
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=API_KEY,
 )
 
-LLM_MODEL = "z-ai/glm-4.5-air:free"
-
-# ========= 2. 路径配置：媒体写到 WebStorm 前端项目 =========
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# ⛏⛏⛏ 只需要确认这一行：必须是 index.html 所在的目录 ⛏⛏⛏
-FRONTEND_WEB_DIR = r"E:\PycharmDemo\Deepseek\digital-human-web\web"
-
-AUDIO_DIR = os.path.join(FRONTEND_WEB_DIR, "media", "audio")
-VIDEO_DIR = os.path.join(FRONTEND_WEB_DIR, "media", "video")
-os.makedirs(AUDIO_DIR, exist_ok=True)
-os.makedirs(VIDEO_DIR, exist_ok=True)
-
-print("[路径调试] BASE_DIR         =", BASE_DIR)
-print("[路径调试] FRONTEND_WEB_DIR =", FRONTEND_WEB_DIR)
-print("[路径调试] AUDIO_DIR        =", AUDIO_DIR)
-print("[路径调试] VIDEO_DIR        =", VIDEO_DIR)
-
-# ========= 3. TTS 配置 =========
-
-VOICE = "zh-CN-XiaoxiaoNeural"
-
-
-def clean_text_for_tts(text: str) -> str:
-    # 移除括号内容
-    text = re.sub(r"（.*?）", "", text)
-    text = re.sub(r"\(.*?\)", "", text)
-
-    # 极简化处理：只保留中文汉字、数字、字母和基本标点
-    # 移除非ASCII字符，包括波浪号、特殊符号等
-    text = re.sub(r'[^0-9a-zA-Z\u4e00-\u9fa5，。！？：；\s]', '', text)
-
-    # 规范化空白字符
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-async def tts_edge_to_file(text: str, out_path: str):
-    cleaned = clean_text_for_tts(text)
-    print(f"[TTS] 清理后文本: '{cleaned}' (长度: {len(cleaned)})")
-
-    if not cleaned:
-        raise RuntimeError("TTS 文本为空")
-
-    if len(cleaned) > 200:
-        print(f"[TTS] ⚠️ 文本过长 ({len(cleaned)} 字符)")
-
-    # 使用线程池执行同步的 TTS 调用 (1.1倍语速)
-    await asyncio.to_thread(
-        edge_tts.Communicate(cleaned, VOICE, rate="+10%").save_sync, out_path
-    )
-
-    # 验证文件
-    if os.path.getsize(out_path) > 0:
-        print(f"[TTS] ✅ {out_path}")
-    else:
-        os.remove(out_path)
-        raise RuntimeError("TTS 生成失败：文件为空")
-
-
-# ========= 4. LLM 对话上下文 =========
+emotion_worker = EmotionWorkerClient(BASE_DIR)
 
 messages = [
     {
         "role": "system",
         "content": (
             "你是一个温柔、有趣的中文语音助手，正在和用户进行电话聊天。\n"
-            "说话风格要求：\n"
-            "1. 像微信语音聊天一样自然，用口语化的中文，多用'我'和'你'。\n"
-            "2. 每次回复控制在 1～2 句话，要短小精悍，别啰嗦！\n"
-            "3. 语气轻松活泼，像朋友聊天一样。\n"
-            "4. 不要长篇大论，不要讲大道理，就日常聊天即可。\n"
-            "5. 如果知识简单的问候，或者用户问你能不能听到这类的，你只需要一句话简单回复就好。\n"
-            "6. 当用户问问题时，简单直接回答就好。"
+            "回复要求：\n"
+            "1. 像微信语音聊天一样自然，尽量口语化。\n"
+            "2. 每次回复控制在 1 到 3 句，短小精悍。\n"
+            "3. 语气轻松，像朋友聊天。\n"
+            "4. 不要长篇大论，不要讲大道理。\n"
+            "5. 用户简单问候时，一句话简短回复即可。\n"
+            "6. 用户提问时，直接回答重点。"
         ),
     }
 ]
 
 
-async def handle_user_text(websocket, text: str):
+def clean_text_for_tts(text: str) -> str:
+    text = re.sub(r"（.*?）", "", text)
+    text = re.sub(r"\(.*?\)", "", text)
+    text = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fa5，。！？；：、“”‘’《》…\-\s]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+async def tts_edge_to_file(text: str, out_path: Path) -> None:
+    cleaned = clean_text_for_tts(text)
+    print(f"[TTS] 清理后文本: '{cleaned}' (长度: {len(cleaned)})")
+
+    if not cleaned:
+        raise RuntimeError("TTS 文本为空")
+
+    await asyncio.to_thread(
+        edge_tts.Communicate(cleaned, VOICE, rate="+10%").save_sync,
+        str(out_path),
+    )
+
+    if out_path.exists() and out_path.stat().st_size > 0:
+        print(f"[TTS] 成功生成: {out_path}")
+        return
+
+    if out_path.exists():
+        out_path.unlink(missing_ok=True)
+    raise RuntimeError("TTS 生成失败：音频文件为空")
+
+
+async def generate_llm_reply(user_text: str) -> str:
     global messages
 
+    messages.append({"role": "user", "content": user_text})
+    try:
+        completion = client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": HTTP_REFERER,
+                "X-Title": SITE_TITLE,
+            },
+            model=LLM_MODEL,
+            messages=messages,
+            timeout=15,
+        )
+        reply = completion.choices[0].message.content or ""
+        reply = reply.strip()
+        if not reply:
+            raise RuntimeError("LLM 返回了空内容")
+        print("[AI] 模型回复:\n", reply)
+    except Exception as exc:
+        print(f"[LLM] 请求超时或失败：{exc}")
+        reply = "抱歉，我刚才没听清，你能再说一遍吗？"
+
+    messages.append({"role": "assistant", "content": reply})
+    return reply
+
+
+async def handle_user_text(websocket, text: str) -> None:
     user_text = text.strip()
     if not user_text:
         return
 
     print("[用户] 前端发来的文本：", user_text)
-    messages.append({"role": "user", "content": user_text})
+    model_reply = await generate_llm_reply(user_text)
 
-    # ===== 1) 调 LLM =====
-    model_reply = None
-    try:
-        completion = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "https://your-site-url.com",
-                "X-Title": "Your Site Name",
-            },
-            extra_body={},
-            model=LLM_MODEL,
-            messages=messages,
-            timeout=15,  # 15秒超时
-        )
-        model_reply = completion.choices[0].message.content
-        print("[AI] 模型回复：\n", model_reply)
-        messages.append({"role": "assistant", "content": model_reply})
-    except Exception as e:
-        print(f"[LLM] 请求超时或失败：{e}")
-        model_reply = "抱歉，我刚才没听清，你能再说一遍吗？"
-        messages.append({"role": "assistant", "content": model_reply})
-
-    # ===== 2) 生成文件名 & 路径 =====
     ts = int(time.time() * 1000)
     audio_filename = f"reply_{ts}.mp3"
-
-    audio_abs = os.path.join(AUDIO_DIR, audio_filename)
-
-    # ⛏ 注意：这里给前端的是"相对 index.html 的路径"
+    audio_abs = AUDIO_DIR / audio_filename
     audio_rel = f"media/audio/{audio_filename}"
 
     print("[调试] 将要写入音频文件：", audio_abs)
     print("[调试] 语音模式：仅生成音频，不生成视频")
 
-    # ===== 3) TTS =====
     tts_success = False
     try:
-        await asyncio.wait_for(tts_edge_to_file(model_reply, audio_abs), timeout=20)  # 20秒超时
-        print("[TTS] ✅ 语音生成成功")
+        await asyncio.wait_for(tts_edge_to_file(model_reply, audio_abs), timeout=20)
+        print("[TTS] 语音生成成功")
         tts_success = True
     except asyncio.TimeoutError:
-        print("[TTS] ❌ 语音生成超时")
-        # 超时后也要检查文件是否已生成
-        if os.path.exists(audio_abs):
-            file_size = os.path.getsize(audio_abs)
-            if file_size > 0:
-                print(f"[TTS] ✅ 音频文件已生成 (大小: {file_size} bytes)，继续使用")
-                tts_success = True
-            else:
-                print("[TTS] 音频文件为空，跳过TTS")
-                audio_rel = None
+        print("[TTS] 语音生成超时")
+        if audio_abs.exists() and audio_abs.stat().st_size > 0:
+            print(f"[TTS] 检测到超时后文件已生成，继续使用：{audio_abs}")
+            tts_success = True
+    except Exception as exc:
+        print(f"[TTS] 语音生成过程出错：{exc}")
+        if audio_abs.exists() and audio_abs.stat().st_size > 0:
+            print(f"[TTS] 检测到音频文件已生成，继续使用：{audio_abs}")
+            tts_success = True
         else:
-            print("[TTS] 跳过TTS，继续使用文本模式")
-            audio_rel = None
-    except Exception as e:
-        print(f"[TTS] 语音生成过程出错：{e}")
-        # Edge TTS的bug：即使报错，文件也可能已生成
-        if os.path.exists(audio_abs):
-            file_size = os.path.getsize(audio_abs)
-            if file_size > 0:
-                print(f"[TTS] ✅ 检测到音频文件已生成 (大小: {file_size} bytes)，继续使用")
-                tts_success = True
-            else:
-                print("[TTS] 音频文件大小为0，跳过TTS")
-                audio_rel = None
-                # 删除空文件
-                try:
-                    os.remove(audio_abs)
-                except:
-                    pass
-        else:
-            print("[TTS] 跳过TTS，继续使用文本模式")
-            audio_rel = None
+            audio_abs.unlink(missing_ok=True)
 
-    # 再确认一次文件确实在磁盘上
-    print("[调试] exists(audio_abs)?", os.path.exists(audio_abs))
-    print(f"[调试] TTS状态: {'成功' if tts_success else '跳过'}")
+    print("[调试] exists(audio_abs)?", audio_abs.exists())
+    print(f"[调试] TTS状态: {'成功' if tts_success else '失败'}")
 
-    # ===== 4) 通知前端 =====
     reply_msg = {
         "type": "bot_reply",
         "text": model_reply,
         "mode": "audio_only",
+        "audio": audio_rel if tts_success else None,
     }
-
-    # TTS 成功才返回音频路径，失败时返回 null，避免前端去请求不存在文件
-    if tts_success and audio_rel:
-        reply_msg["audio"] = audio_rel
-    else:
-        reply_msg["audio"] = None
+    if not tts_success:
         reply_msg["audio_error"] = "tts_failed"
 
     await websocket.send(json.dumps(reply_msg, ensure_ascii=False))
 
 
-# ========= 5. WebSocket =========
+async def handle_emotion_frame(websocket, session_id: str, image_base64: str) -> None:
+    if not image_base64:
+        return
 
-async def signaling_handler(websocket):
-    print("[前端] 有前端连上来了")
+    try:
+        result = await emotion_worker.analyze_frame(image_base64, session_id=session_id)
+    except Exception as exc:
+        print(f"[情绪] 实时分析失败：{exc}")
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "emotion_error",
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if result.get("error"):
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "emotion_error",
+                    "error": str(result["error"]),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    payload = {
+        "type": "emotion_result",
+        "has_face": bool(result.get("has_face")),
+        "region": result.get("region"),
+        "scores": result.get("scores"),
+        "dominant_emotion": result.get("dominant_emotion"),
+        "confidence": result.get("confidence"),
+        "backend": result.get("backend"),
+        "quality_reason": result.get("quality_reason"),
+        "brightness": result.get("brightness"),
+        "sharpness": result.get("sharpness"),
+    }
+    await websocket.send(json.dumps(payload, ensure_ascii=False))
+
+
+async def signaling_handler(websocket) -> None:
+    session_id = uuid.uuid4().hex
+    print(f"[前端] 有前端连接：session={session_id[:8]}")
     try:
         async for message in websocket:
             try:
@@ -220,23 +230,24 @@ async def signaling_handler(websocket):
             if msg_type == "join":
                 role = data.get("role", "?")
                 print("前端加入，role =", role)
-                await websocket.send(json.dumps({
-                    "type": "server_reply",
-                    "text": "信令服务器已收到 join，DeepSeek / TTS 语音模式已接管。",
-                    "mode": "audio_only",
-                }, ensure_ascii=False))
-
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "server_reply",
+                            "text": "信令服务器已收到 join，DeepSeek / TTS 语音模式已接管。",
+                            "mode": "audio_only",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             elif msg_type == "user_text":
-                text = data.get("text", "")
-                try:
-                    await handle_user_text(websocket, text)
-                except Exception as e:
-                    print("处理 user_text 出错：", e)
-                    err_msg = {
-                        "type": "bot_error",
-                        "error": str(e),
-                    }
-                    await websocket.send(json.dumps(err_msg, ensure_ascii=False))
+                await handle_user_text(websocket, str(data.get("text", "")))
+            elif msg_type == "emotion_frame":
+                await handle_emotion_frame(
+                    websocket,
+                    session_id=session_id,
+                    image_base64=str(data.get("image", "")),
+                )
             elif msg_type == "frontend_log":
                 level = str(data.get("level", "log")).upper()
                 text = str(data.get("text", "")).strip()
@@ -244,19 +255,26 @@ async def signaling_handler(websocket):
                     print(f"[前端控制台] [{level}] {text}")
             else:
                 print("收到未知类型消息：", data)
-
     except websockets.ConnectionClosed:
-        print("前端连接关闭了")
+        print(f"[前端] 连接关闭：session={session_id[:8]}")
 
 
-async def main():
+async def main() -> None:
     print("==================================================")
     print("WebSocket 服务正在启动，监听 ws://localhost:9998")
-    print("语音模式：只生成音频，不生成视频，速度更快！")
+    print("语音模式：仅生成音频，不生成视频，情绪识别按需启用")
+    print("[路径调试] BASE_DIR         =", BASE_DIR)
+    print("[路径调试] FRONTEND_WEB_DIR =", FRONTEND_WEB_DIR)
+    print("[路径调试] AUDIO_DIR        =", AUDIO_DIR)
+    print("[路径调试] VIDEO_DIR        =", VIDEO_DIR)
     print("==================================================")
-    async with websockets.serve(signaling_handler, "localhost", 9998):
-        print("WebSocket 服务已启动，等待前端连接...")
-        await asyncio.Future()
+
+    try:
+        async with websockets.serve(signaling_handler, "localhost", 9998, max_size=2_000_000):
+            print("WebSocket 服务已启动，等待前端连接...")
+            await asyncio.Future()
+    finally:
+        await emotion_worker.stop()
 
 
 if __name__ == "__main__":

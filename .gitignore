@@ -28,3 +28,6 @@ digital-human-web/web/media/video/
 
 # DeepFace cache
 emotion/.deepface/
+
+# Diagnostics outputs
+diagnostics/output/

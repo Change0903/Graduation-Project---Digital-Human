@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>登录 - 情感数字人</title>
+    <style>
+        :root {
+            --bg: #07111f;
+            --card: rgba(11, 24, 42, 0.92);
+            --line: rgba(148, 163, 184, 0.2);
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --accent: #22c55e;
+            --accent-2: #38bdf8;
+            --danger: #f87171;
+            --success: #4ade80;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at 18% 18%, rgba(34, 197, 94, 0.18), transparent 28%),
+                radial-gradient(circle at 82% 12%, rgba(56, 189, 248, 0.2), transparent 26%),
+                linear-gradient(145deg, #07111f 0%, #0f172a 55%, #020617 100%);
+            display: grid;
+            place-items: center;
+            padding: 24px;
+        }
+
+        .auth-shell {
+            width: min(960px, 100%);
+            display: grid;
+            grid-template-columns: 1fr 420px;
+            gap: 28px;
+            align-items: center;
+        }
+
+        .intro {
+            padding: 26px;
+        }
+
+        .intro-eyebrow {
+            color: var(--accent-2);
+            font-size: 13px;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+        }
+
+        .intro h1 {
+            margin: 14px 0 14px;
+            font-size: clamp(34px, 6vw, 64px);
+            line-height: 1.05;
+        }
+
+        .intro p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 15px;
+            line-height: 1.9;
+        }
+
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 22px;
+        }
+
+        .feature-item {
+            padding: 12px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: rgba(15, 23, 42, 0.62);
+            color: #dbeafe;
+            font-size: 13px;
+        }
+
+        .privacy-note {
+            margin-top: 18px;
+            padding: 14px 16px;
+            border: 1px solid rgba(56, 189, 248, 0.24);
+            border-radius: 18px;
+            background: rgba(15, 23, 42, 0.58);
+            color: #cbd5e1;
+            font-size: 13px;
+            line-height: 1.8;
+        }
+
+        .auth-card {
+            border: 1px solid var(--line);
+            border-radius: 28px;
+            background: var(--card);
+            box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
+            backdrop-filter: blur(16px);
+            padding: 24px;
+        }
+
+        .tabs {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 18px;
+        }
+
+        .tab-btn {
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.82);
+            color: var(--muted);
+            cursor: pointer;
+            padding: 10px 8px;
+            font-weight: 700;
+        }
+
+        .tab-btn.active {
+            color: white;
+            border-color: transparent;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        }
+
+        .auth-panel {
+            display: none;
+        }
+
+        .auth-panel.active {
+            display: block;
+        }
+
+        .field {
+            display: grid;
+            gap: 8px;
+            margin-bottom: 13px;
+        }
+
+        label {
+            color: #dbeafe;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        input {
+            width: 100%;
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 16px;
+            background: rgba(15, 23, 42, 0.82);
+            color: var(--text);
+            outline: none;
+            padding: 13px 14px;
+            font-size: 14px;
+        }
+
+        input:focus {
+            border-color: rgba(56, 189, 248, 0.8);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+        }
+
+        .captcha-row {
+            display: grid;
+            grid-template-columns: 110px 1fr 42px;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .captcha-question {
+            display: grid;
+            place-items: center;
+            height: 46px;
+            border-radius: 16px;
+            background:
+                linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(34, 197, 94, 0.15)),
+                repeating-linear-gradient(45deg, rgba(255,255,255,0.05) 0 4px, transparent 4px 8px);
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            font-family: "Consolas", monospace;
+            font-size: 17px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+        }
+
+        .refresh-btn {
+            height: 46px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: rgba(15, 23, 42, 0.82);
+            color: var(--text);
+            cursor: pointer;
+            font-size: 18px;
+        }
+
+        .submit-btn {
+            width: 100%;
+            margin-top: 6px;
+            border: none;
+            border-radius: 999px;
+            padding: 13px 16px;
+            color: white;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            font-weight: 800;
+            cursor: pointer;
+        }
+
+        .message-box {
+            min-height: 22px;
+            margin: 12px 0 2px;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .message-box.error {
+            color: var(--danger);
+        }
+
+        .message-box.success {
+            color: var(--success);
+        }
+
+        .hint {
+            margin: 10px 0 0;
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.7;
+        }
+
+        @media (max-width: 860px) {
+            .auth-shell {
+                grid-template-columns: 1fr;
+            }
+
+            .intro {
+                padding: 0;
+            }
+
+            .feature-list {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+<main class="auth-shell">
+    <section class="intro">
+        <div class="intro-eyebrow">Digital Human Access</div>
+        <h1>情感数字人系统</h1>
+        <p>
+            进入语音交互、情绪识别和数字人展示界面。普通用户可以注册登录；
+            调试时可以使用开发者模式快速进入，避免反复创建账号。
+        </p>
+        <div class="feature-list">
+            <div class="feature-item">语音对话</div>
+            <div class="feature-item">情绪识别</div>
+            <div class="feature-item">开发者调试</div>
+        </div>
+        <div class="privacy-note">
+            隐私说明：本系统仅用于本地演示，不上传摄像头原始视频；麦克风、摄像头与聊天记录仅用于当前数字人交互流程。
+        </div>
+    </section>
+
+    <section class="auth-card">
+        <div class="tabs">
+            <button class="tab-btn active" type="button" data-target="loginForm">登录</button>
+            <button class="tab-btn" type="button" data-target="registerForm">注册</button>
+            <button class="tab-btn" type="button" data-target="developerForm">开发者</button>
+        </div>
+
+        <form id="loginForm" class="auth-panel active">
+            <div class="field">
+                <label for="loginUsername">账号</label>
+                <input id="loginUsername" name="username" autocomplete="username" placeholder="请输入账号" />
+            </div>
+            <div class="field">
+                <label for="loginPassword">密码</label>
+                <input id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+            </div>
+            <div class="field">
+                <label>验证码</label>
+                <div class="captcha-row">
+                    <div class="captcha-question">1 + 1 = ?</div>
+                    <input class="captcha-input" autocomplete="off" placeholder="答案" />
+                    <button class="refresh-btn" type="button" title="刷新验证码">↻</button>
+                </div>
+            </div>
+            <button class="submit-btn" type="submit">登录系统</button>
+        </form>
+
+        <form id="registerForm" class="auth-panel">
+            <div class="field">
+                <label for="registerUsername">账号</label>
+                <input id="registerUsername" name="username" autocomplete="username" placeholder="至少 3 个字符" />
+            </div>
+            <div class="field">
+                <label for="registerPassword">密码</label>
+                <input id="registerPassword" name="password" type="password" autocomplete="new-password" placeholder="至少 6 位" />
+            </div>
+            <div class="field">
+                <label for="confirmPassword">确认密码</label>
+                <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" placeholder="再次输入密码" />
+            </div>
+            <div class="field">
+                <label>验证码</label>
+                <div class="captcha-row">
+                    <div class="captcha-question">1 + 1 = ?</div>
+                    <input class="captcha-input" autocomplete="off" placeholder="答案" />
+                    <button class="refresh-btn" type="button" title="刷新验证码">↻</button>
+                </div>
+            </div>
+            <button class="submit-btn" type="submit">注册并进入</button>
+        </form>
+
+        <form id="developerForm" class="auth-panel">
+            <div class="field">
+                <label for="developerPassword">开发者密码</label>
+                <input id="developerPassword" name="developerPassword" type="password" placeholder="默认密码 111111" />
+            </div>
+            <div class="field">
+                <label>验证码</label>
+                <div class="captcha-row">
+                    <div class="captcha-question">1 + 1 = ?</div>
+                    <input class="captcha-input" autocomplete="off" placeholder="答案" />
+                    <button class="refresh-btn" type="button" title="刷新验证码">↻</button>
+                </div>
+            </div>
+            <button class="submit-btn" type="submit">进入开发者模式</button>
+            <p class="hint">开发者模式只用于本地调试，正式产品不要使用固定密码。</p>
+        </form>
+
+        <div id="messageBox" class="message-box">请输入信息后继续。</div>
+    </section>
+</main>
+
+<script src="login.js"></script>
+</body>
+</html>

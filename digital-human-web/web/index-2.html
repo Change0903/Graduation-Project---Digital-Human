@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>情感数字人 - 语音模式</title>
+    <script src="auth_guard.js"></script>
     <style>
         :root {
             --bg: #07111f;
@@ -126,6 +127,18 @@
             line-height: 1.7;
         }
 
+        .privacy-notice {
+            position: fixed;
+            left: 18px;
+            right: 18px;
+            bottom: 8px;
+            z-index: 20;
+            color: rgba(203, 213, 225, 0.78);
+            font-size: 12px;
+            text-align: center;
+            pointer-events: none;
+        }
+
         .hero-card .panel-inner {
             padding-bottom: 16px;
         }
@@ -164,6 +177,36 @@
         .status-text {
             color: var(--muted);
             font-size: 12px;
+        }
+
+        .conversation-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        #conversationSelect {
+            width: 170px;
+            min-width: 0;
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.85);
+            color: var(--text);
+            padding: 8px 12px;
+            font-size: 12px;
+            outline: none;
+        }
+
+        .small-action-btn {
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 999px;
+            background: rgba(56, 189, 248, 0.15);
+            color: #dbeafe;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
         }
 
         .chat-window {
@@ -207,6 +250,43 @@
             gap: 10px;
         }
 
+        .composer-options {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            gap: 12px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .web-search-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+            flex-shrink: 0;
+            min-height: 30px;
+            padding: 0 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(15, 23, 42, 0.58);
+            color: #e2e8f0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .web-search-toggle input {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent);
+        }
+
+        .web-search-hint {
+            color: var(--muted);
+        }
+
         #userText {
             flex: 1;
             min-width: 0;
@@ -244,6 +324,14 @@
 
         #voiceBtn {
             background: linear-gradient(135deg, #0ea5e9, #2563eb);
+        }
+
+        #newConversationBtn {
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            background: rgba(56, 189, 248, 0.15);
+            color: #dbeafe;
+            padding: 8px 12px;
+            font-size: 12px;
         }
 
         .emotion-card .panel-inner,
@@ -323,7 +411,7 @@
             width: 0%;
             border-radius: 999px;
             background: linear-gradient(90deg, #38bdf8, #22c55e);
-            transition: width 0.18s ease;
+            transition: width 0.06s ease-out;
         }
 
         .avatar-stage {
@@ -350,6 +438,7 @@
             .app-shell {
                 grid-template-columns: minmax(280px, 320px) minmax(400px, 1fr) minmax(300px, 340px);
             }
+
         }
 
         @media (max-width: 1080px) {
@@ -414,6 +503,7 @@
                 <div class="mode-switch">
                     <a href="index.html" class="mode-btn">视频模式</a>
                     <a href="index-2.html" class="mode-btn active">语音模式</a>
+                    <a href="login.html" id="logoutBtn" class="mode-btn">退出登录</a>
                 </div>
 
                 <div>
@@ -427,7 +517,10 @@
             <div class="panel-inner">
                 <div class="card-header">
                     <span class="card-title">对话记录</span>
-                    <span class="status-text">支持打字与语音交互</span>
+                    <div class="conversation-actions">
+                        <select id="conversationSelect" title="选择历史对话"></select>
+                        <button id="newConversationBtn" class="small-action-btn" type="button">新对话</button>
+                    </div>
                 </div>
                 <div id="chatWindow" class="chat-window"></div>
             </div>
@@ -435,6 +528,13 @@
 
         <div class="panel-card composer-card">
             <div class="panel-inner">
+                <div class="composer-options">
+                    <label class="web-search-toggle">
+                        <input id="webSearchToggle" type="checkbox" />
+                        <span id="webSearchLabel">联网：关</span>
+                    </label>
+                    <span class="web-search-hint">开启后可查询实时信息，但回复会变慢</span>
+                </div>
                 <div class="input-bar">
                     <input id="userText" placeholder="对数字人说点什么..." />
                     <button id="voiceBtn">说话</button>
@@ -461,6 +561,7 @@
 </div>
 
 <audio id="replyAudio"></audio>
+<div class="privacy-notice">隐私说明：本系统仅用于本地演示，不上传摄像头原始视频；麦克风、摄像头与聊天记录仅用于当前数字人交互流程。</div>
 
 <script src="main.js"></script>
 </body>

@@ -5,8 +5,10 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 import json
+from datetime import datetime
 from pathlib import Path
 
 import tkinter as tk
@@ -14,10 +16,14 @@ from tkinter import ttk
 from tkinter import messagebox
 from tkinter.scrolledtext import ScrolledText
 
+from storage import DigitalHumanStorage
+
 
 BACKEND_PORT = 9998
 FRONTEND_PORT = 8080
 FRONTEND_URL = f"http://localhost:{FRONTEND_PORT}/index-2.html"
+LOGIN_URL = f"http://localhost:{FRONTEND_PORT}/login.html"
+DEV_FRONTEND_URL = f"{FRONTEND_URL}?dev_bypass=1"
 FRONTEND_CONSOLE_PREFIX = "[前端控制台]"
 
 COLOR_APP_BG = "#eef3f9"
@@ -42,6 +48,40 @@ def is_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bo
         sock.close()
 
 
+def find_listening_pids(port: int) -> set[int]:
+    """返回占用指定端口的 PID。用于清理旧启动器残留进程。"""
+    if os.name != "nt":
+        return set()
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except Exception:
+        return set()
+
+    pids: set[int] = set()
+    port_suffix = f":{port}"
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        local_addr, state, pid_text = parts[1], parts[3], parts[4]
+        if state.upper() != "LISTENING":
+            continue
+        if not local_addr.endswith(port_suffix):
+            continue
+        try:
+            pids.add(int(pid_text))
+        except ValueError:
+            continue
+    return pids
+
+
 class LauncherApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -53,6 +93,13 @@ class LauncherApp:
         self.base_dir = self._resolve_base_dir()
         self.frontend_dir = self.base_dir / "digital-human-web" / "web"
         self.backend_script = self.base_dir / "server-2.py"
+        self.runtime_dir = self.base_dir / "runtime"
+        self.user_registry_file = self.runtime_dir / "user_registry.json"
+        self.user_memory_file = self.runtime_dir / "user_memory.json"
+        self.admin_delete_state_file = self.runtime_dir / "admin_delete_state.json"
+        self.sqlite_file = self.runtime_dir / "digital_human.db"
+        self.storage = DigitalHumanStorage(self.sqlite_file)
+        self.storage.migrate_legacy_json(self.user_registry_file, self.user_memory_file)
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.python_exe = self._resolve_python_exe()
 
@@ -66,6 +113,7 @@ class LauncherApp:
         self._append_log(f"[系统] Python: {self.python_exe}")
         self._append_log(f"[系统] 前端目录: {self.frontend_dir}")
         self._append_log(f"[系统] 后端脚本: {self.backend_script}")
+        self._append_log(f"[系统] SQLite数据: {self.sqlite_file}")
 
         self._refresh_status()
         self._drain_log_queue()
@@ -315,6 +363,9 @@ class LauncherApp:
         ttk.Button(button_row, text="打开前端页面", style="Secondary.TButton", command=self.open_frontend).pack(
             side="left", padx=(0, 8)
         )
+        ttk.Button(button_row, text="开发者直达", style="Secondary.TButton", command=self.open_frontend_dev).pack(
+            side="left", padx=(0, 8)
+        )
         ttk.Button(button_row, text="清空日志", style="Secondary.TButton", command=self.clear_log).pack(side="left")
 
         notebook = ttk.Notebook(container, style="App.TNotebook")
@@ -322,8 +373,10 @@ class LauncherApp:
 
         frame_main = tk.Frame(notebook, bg=COLOR_CARD_BG)
         frame_frontend = tk.Frame(notebook, bg=COLOR_CARD_BG)
+        frame_admin = tk.Frame(notebook, bg=COLOR_CARD_BG)
         notebook.add(frame_main, text="系统 + 后端")
         notebook.add(frame_frontend, text="前端控制台")
+        notebook.add(frame_admin, text="后台管理")
 
         self.log_text = ScrolledText(
             frame_main,
@@ -354,6 +407,59 @@ class LauncherApp:
         )
         self.frontend_log_text.pack(fill="both", expand=True, padx=8, pady=8)
         self._configure_log_widget(self.frontend_log_text)
+
+        self._build_admin_tab(frame_admin)
+
+    def _build_admin_tab(self, parent: tk.Frame) -> None:
+        toolbar = tk.Frame(parent, bg=COLOR_CARD_BG)
+        toolbar.pack(fill="x", padx=10, pady=(10, 6))
+
+        self.admin_summary_var = tk.StringVar(value="用户数：0    对话数：0")
+        tk.Label(
+            toolbar,
+            textvariable=self.admin_summary_var,
+            fg=COLOR_TEXT,
+            bg=COLOR_CARD_BG,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side="left")
+
+        ttk.Button(toolbar, text="刷新", style="Secondary.TButton", command=self.refresh_admin_data).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(
+            toolbar,
+            text="一键删除全部",
+            style="Secondary.TButton",
+            command=self.delete_all_admin_data,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            toolbar,
+            text="删除选中用户",
+            style="Secondary.TButton",
+            command=self.delete_selected_user,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            toolbar,
+            text="删除选中对话",
+            style="Secondary.TButton",
+            command=self.delete_selected_conversation,
+        ).pack(side="right", padx=(8, 0))
+
+        columns = ("role", "conversation_count", "message_count", "last_login")
+        self.admin_tree = ttk.Treeview(parent, columns=columns, show="tree headings", height=22)
+        self.admin_tree.heading("#0", text="账号 / 对话")
+        self.admin_tree.heading("role", text="角色")
+        self.admin_tree.heading("conversation_count", text="对话数")
+        self.admin_tree.heading("message_count", text="消息数")
+        self.admin_tree.heading("last_login", text="最近登录")
+        self.admin_tree.column("#0", width=260, minwidth=180)
+        self.admin_tree.column("role", width=90, anchor="center")
+        self.admin_tree.column("conversation_count", width=90, anchor="center")
+        self.admin_tree.column("message_count", width=90, anchor="center")
+        self.admin_tree.column("last_login", width=160, anchor="center")
+        self.admin_tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.refresh_admin_data()
 
     def _append_log(self, text: str) -> None:
         self._append_log_to_widget(self.log_text, text)
@@ -473,13 +579,204 @@ class LauncherApp:
             proc.kill()
             proc.wait(timeout=2)
 
+    def _stop_port_processes(self, name: str, port: int) -> None:
+        """清理占用项目端口的旧进程，解决旧启动器残留导致无法接管日志的问题。"""
+        pids = find_listening_pids(port)
+        current_pid = os.getpid()
+        pids.discard(current_pid)
+        if not pids:
+            return
+
+        for pid in sorted(pids):
+            self.log_queue.put(f"[系统] 发现{name}端口 {port} 被旧进程 PID={pid} 占用，正在结束")
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F", "/T"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=8,
+                )
+            except Exception as exc:
+                self.log_queue.put(f"[系统] 结束 PID={pid} 失败：{exc}")
+
+        time.sleep(0.4)
+
+    def _load_json_file(self, path: Path, default):
+        if not path.exists():
+            return default
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+            return data if data is not None else default
+        except Exception as exc:
+            messagebox.showerror("读取失败", f"读取 {path} 失败：\n{exc}")
+            return default
+
+    def _save_json_file(self, path: Path, data) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+
+    def _mark_conversation_deleted(self, user: str, conversation: str) -> None:
+        state = self._load_json_file(self.admin_delete_state_file, {})
+        if not isinstance(state, dict):
+            state = {}
+        deleted_conversations = state.setdefault("deleted_conversations", {})
+        if not isinstance(deleted_conversations, dict):
+            deleted_conversations = {}
+            state["deleted_conversations"] = deleted_conversations
+        user_deleted = deleted_conversations.setdefault(user, [])
+        if conversation not in user_deleted:
+            user_deleted.append(conversation)
+        self._save_json_file(self.admin_delete_state_file, state)
+
+    def _mark_user_deleted(self, user: str) -> None:
+        state = self._load_json_file(self.admin_delete_state_file, {})
+        if not isinstance(state, dict):
+            state = {}
+        deleted_users = state.setdefault("deleted_users", {})
+        if isinstance(deleted_users, list):
+            deleted_users = {item: 1 for item in deleted_users}
+            state["deleted_users"] = deleted_users
+        if not isinstance(deleted_users, dict):
+            deleted_users = {}
+            state["deleted_users"] = deleted_users
+        deleted_users[user] = int(time.time())
+        self._save_json_file(self.admin_delete_state_file, state)
+
+    def _mark_all_deleted(self) -> None:
+        state = self._load_json_file(self.admin_delete_state_file, {})
+        if not isinstance(state, dict):
+            state = {}
+        state["delete_all_at"] = int(time.time())
+        self._save_json_file(self.admin_delete_state_file, state)
+
+    def _split_memory_key(self, key: str) -> tuple[str, str]:
+        marker = "__conv__"
+        if marker in key:
+            user, conversation = key.split(marker, 1)
+            return user or "guest", conversation or "default"
+        return key or "guest", "legacy"
+
+    def _resolve_memory_key(self, memory: dict, user: str, conversation: str) -> str:
+        """兼容旧版记忆：旧数据直接用用户名当 key，没有 __conv__ 对话后缀。"""
+        new_key = f"{user}__conv__{conversation}"
+        if new_key in memory:
+            return new_key
+        if conversation == "legacy" and user in memory:
+            return user
+        return new_key
+
+    def _format_timestamp(self, value) -> str:
+        try:
+            ts = float(value)
+            if ts > 10_000_000_000:
+                ts = ts / 1000
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "-"
+
+    def _collect_admin_data(self) -> dict:
+        return self.storage.collect_admin_data()
+
+    def refresh_admin_data(self) -> None:
+        if not hasattr(self, "admin_tree"):
+            return
+        data = self._collect_admin_data()
+        users = data["users"]
+
+        self.admin_tree.delete(*self.admin_tree.get_children())
+        total_conversations = 0
+        for username in sorted(users):
+            info = users[username]
+            conversations = info.get("conversations", {})
+            conversation_count = len(conversations)
+            message_count = sum(c.get("message_count", 0) for c in conversations.values())
+            total_conversations += conversation_count
+            user_iid = f"user::{username}"
+            self.admin_tree.insert(
+                "",
+                "end",
+                iid=user_iid,
+                text=username,
+                values=(
+                    info.get("role", "user"),
+                    conversation_count,
+                    message_count,
+                    self._format_timestamp(info.get("last_login")),
+                ),
+                open=True,
+            )
+
+            for conversation_id in sorted(conversations):
+                conv = conversations[conversation_id]
+                self.admin_tree.insert(
+                    user_iid,
+                    "end",
+                    iid=f"conv::{username}::{conversation_id}",
+                    text=f"对话：{conv.get('title') or '未命名对话'}",
+                    values=("", "", conv.get("message_count", 0), ""),
+                )
+
+        self.admin_summary_var.set(f"用户数：{len(users)}    对话数：{total_conversations}")
+
+    def _selected_admin_item(self) -> tuple[str, str | None, str | None]:
+        selected = self.admin_tree.selection() if hasattr(self, "admin_tree") else ()
+        if not selected:
+            return "", None, None
+        item_id = selected[0]
+        if item_id.startswith("conv::"):
+            _, user, conversation = item_id.split("::", 2)
+            return "conversation", user, conversation
+        if item_id.startswith("user::"):
+            return "user", item_id.split("::", 1)[1], None
+        return "", None, None
+
+    def delete_selected_conversation(self) -> None:
+        item_type, user, conversation = self._selected_admin_item()
+        if item_type != "conversation" or not user or not conversation:
+            messagebox.showinfo("提示", "请先选中一条具体对话。")
+            return
+        if not messagebox.askyesno("确认删除", f"确定删除用户 {user} 的对话 {conversation} 吗？"):
+            return
+
+        self.storage.delete_conversation(user, conversation)
+        self.log_queue.put(f"[系统] 已删除对话记忆: {user} / {conversation}")
+        self.refresh_admin_data()
+
+    def delete_selected_user(self) -> None:
+        item_type, user, _conversation = self._selected_admin_item()
+        if item_type == "conversation":
+            parent = self.admin_tree.parent(self.admin_tree.selection()[0])
+            user = parent.split("::", 1)[1] if parent.startswith("user::") else user
+        if not user:
+            messagebox.showinfo("提示", "请先选中一个用户。")
+            return
+        if not messagebox.askyesno("确认删除", f"确定删除用户 {user} 及其全部对话记忆吗？"):
+            return
+
+        self.storage.delete_user(user)
+        self.log_queue.put(f"[系统] 已删除用户及记忆: {user}")
+        self.refresh_admin_data()
+
+    def delete_all_admin_data(self) -> None:
+        if not messagebox.askyesno("确认一键删除", "确定删除全部用户登记和全部对话记忆吗？此操作不可恢复。"):
+            return
+        self.storage.delete_all()
+        self.log_queue.put("[系统] 已一键删除全部用户登记和对话记忆")
+        self.refresh_admin_data()
+
     def start_backend(self) -> None:
         if self.backend_proc and self.backend_proc.poll() is None:
             self.log_queue.put("[系统] 后端已在运行")
             return
         if is_port_open(BACKEND_PORT):
-            self.log_queue.put(f"[系统] 端口 {BACKEND_PORT} 已被占用，跳过后端启动")
-            return
+            self._stop_port_processes("后端", BACKEND_PORT)
+            if is_port_open(BACKEND_PORT):
+                self.log_queue.put(f"[系统] 端口 {BACKEND_PORT} 仍被占用，后端启动失败")
+                return
         if not self.backend_script.exists():
             messagebox.showerror("启动失败", f"找不到后端脚本: {self.backend_script}")
             return
@@ -496,8 +793,10 @@ class LauncherApp:
             self.log_queue.put("[系统] 前端已在运行")
             return
         if is_port_open(FRONTEND_PORT):
-            self.log_queue.put(f"[系统] 端口 {FRONTEND_PORT} 已被占用，跳过前端启动")
-            return
+            self._stop_port_processes("前端", FRONTEND_PORT)
+            if is_port_open(FRONTEND_PORT):
+                self.log_queue.put(f"[系统] 端口 {FRONTEND_PORT} 仍被占用，前端启动失败")
+                return
         if not self.frontend_dir.exists():
             messagebox.showerror("启动失败", f"找不到前端目录: {self.frontend_dir}")
             return
@@ -519,6 +818,8 @@ class LauncherApp:
         self._stop_proc("前端", self.frontend_proc)
         self.backend_proc = None
         self.frontend_proc = None
+        self._stop_port_processes("后端", BACKEND_PORT)
+        self._stop_port_processes("前端", FRONTEND_PORT)
         self.log_queue.put("[系统] 全部停止完成")
 
     def clear_log(self) -> None:
@@ -530,8 +831,12 @@ class LauncherApp:
         self.frontend_log_text.configure(state="disabled")
 
     def open_frontend(self) -> None:
-        webbrowser.open(FRONTEND_URL)
-        self.log_queue.put(f"[系统] 已打开: {FRONTEND_URL}")
+        webbrowser.open(LOGIN_URL)
+        self.log_queue.put(f"[系统] 已打开登录页: {LOGIN_URL}")
+
+    def open_frontend_dev(self) -> None:
+        webbrowser.open(DEV_FRONTEND_URL)
+        self.log_queue.put(f"[系统] 已开发者直达: {DEV_FRONTEND_URL}")
 
     def _refresh_status(self) -> None:
         backend_proc_alive = self.backend_proc is not None and self.backend_proc.poll() is None

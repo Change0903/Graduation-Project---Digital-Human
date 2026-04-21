@@ -5,25 +5,28 @@ import json
 import sys
 import time
 from collections import deque
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-from deepface_runtime import load_deepface
-from realtime_emotion import EmotionAnalyzer, build_empty_scores, dominant_emotion
+from onnx_emotion_analyzer import (
+    ONNXEmotionAnalyzer,
+    build_empty_scores,
+    dominant_emotion,
+)
 
 
-ANALYZE_INTERVAL_SECONDS = 0.20
-SMOOTHING_ALPHA = 0.55
+ANALYZE_INTERVAL_SECONDS = 0.08
+SMOOTHING_ALPHA = 0.8
 NO_FACE_GRACE_SECONDS = 1.0
-SCORE_HISTORY_SIZE = 5
-REGION_HISTORY_SIZE = 3
+SCORE_HISTORY_SIZE = 2
+REGION_HISTORY_SIZE = 2
 
 
 class LiveEmotionSession:
-    def __init__(self, deepface) -> None:
-        self.deepface = deepface
-        self.analyzer = EmotionAnalyzer(self.deepface)
+    def __init__(self, analyzer: ONNXEmotionAnalyzer) -> None:
+        self.analyzer = analyzer
         self.last_analyze_time = 0.0
         self.last_face_seen_time = 0.0
         self.last_quality_reason = "waiting"
@@ -31,7 +34,7 @@ class LiveEmotionSession:
         self.last_sharpness = 0.0
         self.latest_region: dict[str, int] | None = None
         self.latest_face_confidence = 0.0
-        self.latest_backend = "haar"
+        self.latest_backend = "opencv_zoo_onnx"
         self.score_history: deque[dict[str, float]] = deque(maxlen=SCORE_HISTORY_SIZE)
         self.region_history: deque[dict[str, int]] = deque(maxlen=REGION_HISTORY_SIZE)
         self.smoothed_scores = build_empty_scores()
@@ -71,7 +74,7 @@ class LiveEmotionSession:
         elif now - self.last_face_seen_time > NO_FACE_GRACE_SECONDS:
             self.latest_region = None
             self.latest_face_confidence = 0.0
-            self.latest_backend = "haar"
+            self.latest_backend = "opencv_zoo_onnx"
             self.last_quality_reason = "no_face"
             self.last_brightness = 0.0
             self.last_sharpness = 0.0
@@ -98,16 +101,16 @@ class LiveEmotionSession:
 
 class LiveEmotionWorker:
     def __init__(self) -> None:
-        self.deepface = load_deepface()
+        project_root = Path(__file__).resolve().parents[1]
+        model_dir = project_root / "emotion_onnx_demo" / "models"
+        self.analyzer = ONNXEmotionAnalyzer(model_dir)
         self.sessions: dict[str, LiveEmotionSession] = {}
 
     def warmup(self) -> None:
-        print("正在预热 DeepFace Emotion 模型...", file=sys.stderr, flush=True)
-        self.deepface.build_model(task="facial_attribute", model_name="Emotion")
-        print("DeepFace Emotion 模型预热完成", file=sys.stderr, flush=True)
+        print("OpenCV Zoo ONNX 情绪模型已加载", file=sys.stderr, flush=True)
 
     def analyze_image(self, session_id: str, image_base64: str) -> dict:
-        session = self.sessions.setdefault(session_id, LiveEmotionSession(self.deepface))
+        session = self.sessions.setdefault(session_id, LiveEmotionSession(self.analyzer))
         return session.analyze_image(image_base64)
 
 

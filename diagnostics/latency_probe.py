@@ -17,13 +17,23 @@ OUTPUT_DIR = BASE_DIR / "diagnostics" / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 VOICE = "zh-CN-XiaoxiaoNeural"
-LLM_MODEL = "z-ai/glm-4.5-air:free"
-HTTP_REFERER = os.getenv("OPENROUTER_SITE_URL", "https://your-site-url.com")
-SITE_TITLE = os.getenv("OPENROUTER_SITE_TITLE", "Digital Human Demo")
+LLM_MODEL = os.getenv("DASHSCOPE_MODEL", "qwen3.6-flash")
+LLM_BASE_URL = os.getenv(
+    "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
+
+
+def resolve_llm_api_key() -> str:
+    """优先读取 API_KEY_ALI，兼容旧变量。"""
+    for env_name in ("API_KEY_ALI", "ANTHROPIC_AUTH_TOKEN", "DASHSCOPE_API_KEY", "OPENROUTER_API_KEY"):
+        api_key = os.getenv(env_name)
+        if api_key:
+            return api_key
+    raise RuntimeError("未读取到 LLM API Key，无法测试 LLM 耗时。请先设置 API_KEY_ALI。")
 
 
 def clean_text_for_tts(text: str) -> str:
-    """和主项目保持一致，避免因为测试文本格式不同影响结果。"""
+    """和主项目保持一致，避免测试文本格式影响结果。"""
     text = re.sub(r"（.*?）", "", text)
     text = re.sub(r"\(.*?\)", "", text)
     text = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fa5，。！？；：、“”‘’《》…\-\s]", "", text)
@@ -32,13 +42,9 @@ def clean_text_for_tts(text: str) -> str:
 
 
 def build_client() -> OpenAI:
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("未读取到 OPENROUTER_API_KEY，无法测试 LLM 耗时。")
-
     return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
+        api_key=resolve_llm_api_key(),
+        base_url=LLM_BASE_URL,
     )
 
 
@@ -87,10 +93,6 @@ async def run_tts_probe(text: str, run_index: int) -> dict:
 def run_llm_probe(client: OpenAI, prompt: str) -> dict:
     start = time.perf_counter()
     completion = client.chat.completions.create(
-        extra_headers={
-            "HTTP-Referer": HTTP_REFERER,
-            "X-Title": SITE_TITLE,
-        },
         model=LLM_MODEL,
         messages=[
             {
@@ -102,6 +104,7 @@ def run_llm_probe(client: OpenAI, prompt: str) -> dict:
                 "content": prompt,
             },
         ],
+        extra_body={"enable_thinking": False},
         timeout=20,
     )
     elapsed = time.perf_counter() - start
@@ -112,7 +115,27 @@ def run_llm_probe(client: OpenAI, prompt: str) -> dict:
     return {
         "reply_text": reply,
         "seconds": elapsed,
+        "returned_model": getattr(completion, "model", "未返回"),
+        "usage": getattr(completion, "usage", None),
     }
+
+
+def format_usage(usage: object) -> str:
+    if usage is None:
+        return "未返回 usage"
+
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    total_tokens = getattr(usage, "total_tokens", None)
+
+    parts: list[str] = []
+    if prompt_tokens is not None:
+        parts.append(f"prompt={prompt_tokens}")
+    if completion_tokens is not None:
+        parts.append(f"completion={completion_tokens}")
+    if total_tokens is not None:
+        parts.append(f"total={total_tokens}")
+    return ", ".join(parts) if parts else "未返回 usage"
 
 
 async def run_probe(text: str, repeat: int, skip_llm: bool) -> None:
@@ -129,6 +152,7 @@ async def run_probe(text: str, repeat: int, skip_llm: bool) -> None:
     print(f"测试文本: {text}")
     print(f"测试语音: {VOICE}")
     print(f"测试模型: {LLM_MODEL}")
+    print(f"模型地址: {LLM_BASE_URL}")
     print(f"独立输出目录: {OUTPUT_DIR}")
 
     for index in range(1, repeat + 1):
@@ -140,6 +164,8 @@ async def run_probe(text: str, repeat: int, skip_llm: bool) -> None:
                 llm_reply = llm_result["reply_text"]
                 llm_times.append(llm_result["seconds"])
                 print(f"[LLM] 耗时: {llm_result['seconds']:.2f}s")
+                print(f"[LLM] 返回模型: {llm_result['returned_model']}")
+                print(f"[LLM] usage: {format_usage(llm_result['usage'])}")
                 print(f"[LLM] 回复: {llm_reply}")
             except Exception as exc:
                 llm_error_messages.append(str(exc))
@@ -179,11 +205,12 @@ async def run_probe(text: str, repeat: int, skip_llm: bool) -> None:
     else:
         print("LLM 平均耗时: 已跳过")
 
-    print(f"TTS 平均耗时: {avg_tts:.2f}s")
     if tts_times:
+        print(f"TTS 平均耗时: {avg_tts:.2f}s")
         print(f"TTS 最快/最慢: {min(tts_times):.2f}s / {max(tts_times):.2f}s")
     else:
-        print("TTS 最快/最慢: 无成功样本")
+        print("TTS 平均耗时: 无成功样本")
+
     print(f"结论: {classify_bottleneck(avg_llm, avg_tts)}")
 
     if llm_error_messages:
@@ -194,34 +221,30 @@ async def run_probe(text: str, repeat: int, skip_llm: bool) -> None:
     print("\n简单判断参考：")
     print("- LLM > 4s：接口或模型响应偏慢")
     print("- TTS > 3s：在线语音生成偏慢")
-    print("- 如果两者都慢，通常优先怀疑网络或免费模型排队")
+    print("- 如果两者都慢，通常优先怀疑网络或模型排队")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="独立测试数字人语音链路耗时，不影响主程序。")
     parser.add_argument(
         "--text",
-        default="你好，请用一句自然的中文和我打招呼。",
+        default="你好，请用一句自然的中文和我打个招呼。",
         help="用于测速的测试文本",
     )
     parser.add_argument(
         "--repeat",
         type=int,
         default=2,
-        help="重复测试次数，默认 2 次",
+        help="重复测试次数，默认 2 次。",
     )
     parser.add_argument(
         "--skip-llm",
         action="store_true",
-        help="只测试 TTS，不测试大模型请求",
+        help="只测试 TTS，不测试大模型请求。",
     )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    asyncio.run(run_probe(args.text, max(1, args.repeat), args.skip_llm))
-
-
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    asyncio.run(run_probe(args.text, args.repeat, args.skip_llm))

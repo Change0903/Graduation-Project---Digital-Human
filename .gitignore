@@ -21,13 +21,26 @@ digital-human-web/web/.claude/
 # Build outputs
 build/
 dist/
+DigitalHumanLauncher_v*.spec
 
 # Generated media
 digital-human-web/web/media/audio/
 digital-human-web/web/media/video/
+wav2lip_local_demo/output/
 
 # DeepFace cache
 emotion/.deepface/
+emotion/calibration_samples.jsonl
+emotion/calibration_profile.json
 
 # Diagnostics outputs
 diagnostics/output/
+
+# Generated infographic drafts
+infographic/
+
+# AutoDL launcher state
+.autodl_launcher/
+
+# Local user memory
+runtime/

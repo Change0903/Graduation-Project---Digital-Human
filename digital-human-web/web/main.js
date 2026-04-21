@@ -1,10 +1,15 @@
 ﻿const chatWindow = document.getElementById("chatWindow");
+const conversationSelect = document.getElementById("conversationSelect");
+const newConversationBtn = document.getElementById("newConversationBtn");
 const userTextInput = document.getElementById("userText");
 const sendBtn = document.getElementById("sendBtn");
 const voiceBtn = document.getElementById("voiceBtn");
+const webSearchToggle = document.getElementById("webSearchToggle");
+const webSearchLabel = document.getElementById("webSearchLabel");
 const avatarVideo = document.getElementById("avatarVideo");
 const replyAudio = document.getElementById("replyAudio");
 const statusText = document.getElementById("statusText");
+const logoutBtn = document.getElementById("logoutBtn");
 const emotionVideo = document.getElementById("emotionVideo");
 const emotionStatus = document.getElementById("emotionStatus");
 const emotionBadge = document.getElementById("emotionBadge");
@@ -21,8 +26,18 @@ const EMOTION_LABELS = {
     disgust: "厌恶",
 };
 const EMOTION_ORDER = ["happy", "neutral", "surprise", "sad", "angry", "fear", "disgust"];
-const EMOTION_CAPTURE_INTERVAL_MS = 450;
+// 情绪面板需要实时感，主程序按约 5 帧/秒发送摄像头画面给后端分析。
+// 这里不能无限调低，否则会占用过多 CPU，并影响语音/聊天链路。
+const EMOTION_CAPTURE_INTERVAL_MS = 180;
 const EMOTION_REQUEST_TIMEOUT_MS = 6000;
+const CHAT_HISTORY_PREFIX = "digital_human_chat_history_v1";
+const CHAT_CONVERSATION_PREFIX = "digital_human_conversations_v1";
+const ACTIVE_CONVERSATION_PREFIX = "digital_human_active_conversation_v1";
+const ADMIN_DELETE_ALL_PREFIX = "digital_human_admin_delete_all_v1";
+const ADMIN_DELETE_USER_PREFIX = "digital_human_admin_delete_user_v1";
+const LEGACY_CONVERSATION_ID = "legacy";
+const MAX_CHAT_HISTORY_ITEMS = 80;
+const DEFAULT_CONVERSATION_TITLE = "默认对话";
 
 let conversationState = "idle";
 let recognition = null;
@@ -30,6 +45,10 @@ let recognizing = false;
 let callActive = false;
 let buttonLocked = false;
 let socket = null;
+let activeConversationId = "";
+let activeConversationIsDraft = false;
+let adminDeletePollTimer = null;
+let adminDeletedNoticeTimer = null;
 
 let emotionStream = null;
 let emotionCaptureTimer = null;
@@ -116,12 +135,641 @@ function updateStatus(message) {
     statusText.textContent = message;
 }
 
-function appendMessage(role, text) {
+function updateWebSearchLabel() {
+    if (!webSearchToggle || !webSearchLabel) return;
+    webSearchLabel.textContent = webSearchToggle.checked ? "联网：开" : "联网：关";
+}
+
+function getCurrentSession() {
+    return window.DigitalHumanAuth?.session || {
+        username: "guest",
+        role: "guest",
+    };
+}
+
+function getCurrentUsername() {
+    return String(getCurrentSession().username || "guest");
+}
+
+function getUserStorageScope() {
+    const session = getCurrentSession();
+    const username = String(session.username || "guest");
+    const role = String(session.role || "user");
+    return `${role}_${username}`;
+}
+
+function getConversationMetaKey() {
+    return `${CHAT_CONVERSATION_PREFIX}_${getUserStorageScope()}`;
+}
+
+function getActiveConversationKey() {
+    return `${ACTIVE_CONVERSATION_PREFIX}_${getUserStorageScope()}`;
+}
+
+function getLegacyChatHistoryKey() {
+    return `${CHAT_HISTORY_PREFIX}_${getUserStorageScope()}`;
+}
+
+function getChatHistoryKey(conversationId = activeConversationId) {
+    const safeConversationId = conversationId || "default";
+    return `${CHAT_HISTORY_PREFIX}_${getUserStorageScope()}_${safeConversationId}`;
+}
+
+function generateConversationId() {
+    return `conv_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function readConversations() {
+    try {
+        const raw = localStorage.getItem(getConversationMetaKey());
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (_error) {
+        return [];
+    }
+}
+
+function saveConversations(conversations) {
+    localStorage.setItem(getConversationMetaKey(), JSON.stringify(conversations));
+}
+
+function readLegacyChatHistory() {
+    try {
+        const raw = localStorage.getItem(getLegacyChatHistoryKey());
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (_error) {
+        return [];
+    }
+}
+
+function ensureConversationState() {
+    let conversations = readConversations();
+
+    if (conversations.length === 0) {
+        const legacyHistory = readLegacyChatHistory();
+        if (legacyHistory.length > 0) {
+            const firstId = LEGACY_CONVERSATION_ID;
+            conversations = [{
+                id: firstId,
+                title: DEFAULT_CONVERSATION_TITLE,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            }];
+            saveConversations(conversations);
+            saveChatHistory(legacyHistory, firstId);
+        }
+    }
+
+    const savedActiveId = localStorage.getItem(getActiveConversationKey());
+    const matched = conversations.find((item) => item.id === savedActiveId);
+    if (conversations.length === 0) {
+        activeConversationId = "";
+        activeConversationIsDraft = true;
+    } else {
+        activeConversationId = matched ? matched.id : conversations[0].id;
+        activeConversationIsDraft = false;
+        localStorage.setItem(getActiveConversationKey(), activeConversationId);
+    }
+    repairConversationTitles();
+    renderConversationSelect();
+}
+
+function renderConversationSelect() {
+    if (!conversationSelect) return;
+    const conversations = readConversations();
+    conversationSelect.innerHTML = "";
+    if (activeConversationIsDraft) {
+        const draftOption = document.createElement("option");
+        draftOption.value = "__draft__";
+        draftOption.textContent = "新对话（未保存）";
+        draftOption.selected = true;
+        conversationSelect.appendChild(draftOption);
+    }
+    conversations.forEach((conversation) => {
+        const option = document.createElement("option");
+        option.value = conversation.id;
+        option.textContent = conversation.title || DEFAULT_CONVERSATION_TITLE;
+        option.selected = conversation.id === activeConversationId;
+        conversationSelect.appendChild(option);
+    });
+}
+
+function setActiveConversation(conversationId) {
+    if (conversationId === "__draft__") return;
+    const conversations = readConversations();
+    const matched = conversations.find((item) => item.id === conversationId);
+    if (!matched) return;
+    activeConversationId = matched.id;
+    activeConversationIsDraft = false;
+    localStorage.setItem(getActiveConversationKey(), activeConversationId);
+    renderConversationSelect();
+    loadChatHistory();
+    requestConversationHistory(activeConversationId);
+    updateStatus(`已切换到：${matched.title || DEFAULT_CONVERSATION_TITLE}`);
+}
+
+function createNewConversation() {
+    activeConversationId = generateConversationId();
+    activeConversationIsDraft = true;
+    renderConversationSelect();
+    chatWindow.innerHTML = "";
+    updateStatus("已进入新对话，发送第一句话后才会保存");
+}
+
+function ensureActiveConversationSaved(firstUserText) {
+    if (!activeConversationIsDraft && activeConversationId) return;
+
+    activeConversationId = activeConversationId || generateConversationId();
+    const conversations = readConversations();
+    const conversation = {
+        id: activeConversationId,
+        title: createConversationTitle(firstUserText),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+    };
+    conversations.unshift(conversation);
+    saveConversations(conversations);
+    localStorage.setItem(getActiveConversationKey(), activeConversationId);
+    activeConversationIsDraft = false;
+    renderConversationSelect();
+    syncConversationTitleToBackend(conversation);
+}
+
+function createConversationTitle(userText) {
+    const normalized = userText
+        .replace(/[？?！!。.,，、；;：:]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const cleaned = normalized
+        .replace(/^(请问|请你|帮我|帮忙|我想|我需要|你能不能|能不能|可以不可以|可以帮我|请帮我|麻烦你)/, "")
+        .trim();
+    const titleSource = cleaned || normalized || "新对话";
+    return titleSource.slice(0, 18);
+}
+
+function isPlaceholderConversationTitle(title) {
+    const value = String(title || "").trim();
+    return (
+        !value ||
+        value === "新对话" ||
+        value === DEFAULT_CONVERSATION_TITLE ||
+        value === "未命名对话" ||
+        value.startsWith("conv_")
+    );
+}
+
+function inferTitleFromHistory(conversationId) {
+    const history = readChatHistory(conversationId);
+    const firstUserMessage = history.find((item) => item && item.role === "user" && item.text);
+    return firstUserMessage ? createConversationTitle(firstUserMessage.text) : "";
+}
+
+function repairConversationTitles() {
+    const conversations = readConversations();
+    let changed = false;
+    conversations.forEach((conversation) => {
+        if (!isPlaceholderConversationTitle(conversation.title)) return;
+        const inferredTitle = inferTitleFromHistory(conversation.id);
+        if (!inferredTitle) return;
+        conversation.title = inferredTitle;
+        conversation.updatedAt = Date.now();
+        syncConversationTitleToBackend(conversation);
+        changed = true;
+    });
+    if (changed) {
+        saveConversations(conversations);
+    }
+}
+
+function updateActiveConversationTitle(userText) {
+    const conversations = readConversations();
+    const index = conversations.findIndex((item) => item.id === activeConversationId);
+    if (index < 0) return;
+
+    const currentTitle = conversations[index].title || "";
+    if (!isPlaceholderConversationTitle(currentTitle)) {
+        conversations[index].updatedAt = Date.now();
+        saveConversations(conversations);
+        renderConversationSelect();
+        return;
+    }
+
+    const title = createConversationTitle(userText);
+    conversations[index].title = title;
+    conversations[index].updatedAt = Date.now();
+    saveConversations(conversations);
+    renderConversationSelect();
+    syncConversationTitleToBackend(conversations[index]);
+}
+
+function showAdminDeletedNotice(message) {
+    let notice = document.getElementById("adminDeletedNotice");
+    if (!notice) {
+        notice = document.createElement("div");
+        notice.id = "adminDeletedNotice";
+        notice.style.position = "fixed";
+        notice.style.inset = "0";
+        notice.style.zIndex = "99999";
+        notice.style.display = "flex";
+        notice.style.alignItems = "center";
+        notice.style.justifyContent = "center";
+        notice.style.padding = "28px";
+        notice.style.background = "rgba(8, 12, 20, 0.72)";
+        notice.style.backdropFilter = "blur(6px)";
+        notice.style.textAlign = "center";
+        notice.style.pointerEvents = "auto";
+
+        const card = document.createElement("div");
+        card.style.width = "min(620px, 92vw)";
+        card.style.padding = "34px 38px";
+        card.style.borderRadius = "24px";
+        card.style.background = "linear-gradient(145deg, rgba(18, 28, 44, 0.96), rgba(38, 52, 76, 0.92))";
+        card.style.border = "1px solid rgba(255,255,255,0.18)";
+        card.style.boxShadow = "0 28px 80px rgba(0,0,0,0.45)";
+
+        const title = document.createElement("div");
+        title.id = "adminDeletedNoticeTitle";
+        title.style.color = "#ffffff";
+        title.style.fontSize = "42px";
+        title.style.fontWeight = "800";
+        title.style.letterSpacing = "1px";
+        title.style.textShadow = "0 8px 30px rgba(0,0,0,0.45)";
+
+        const desc = document.createElement("div");
+        desc.textContent = "当前对话已不可继续，请开启一段新的对话。";
+        desc.style.marginTop = "14px";
+        desc.style.color = "rgba(255,255,255,0.76)";
+        desc.style.fontSize = "18px";
+        desc.style.fontWeight = "500";
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "开启新对话";
+        button.style.marginTop = "28px";
+        button.style.padding = "14px 30px";
+        button.style.border = "0";
+        button.style.borderRadius = "999px";
+        button.style.background = "linear-gradient(135deg, #2ee6a6, #39bdf8)";
+        button.style.color = "#06101a";
+        button.style.fontSize = "18px";
+        button.style.fontWeight = "800";
+        button.style.cursor = "pointer";
+        button.style.boxShadow = "0 16px 36px rgba(45, 213, 188, 0.3)";
+        button.addEventListener("click", () => {
+            hideAdminDeletedNotice();
+            createNewConversation();
+            userTextInput?.focus();
+        });
+
+        card.appendChild(title);
+        card.appendChild(desc);
+        card.appendChild(button);
+        notice.appendChild(card);
+        document.body.appendChild(notice);
+    }
+    const title = document.getElementById("adminDeletedNoticeTitle");
+    if (title) {
+        title.textContent = message;
+    }
+    notice.style.display = "flex";
+    notice.style.opacity = "1";
+
+    if (adminDeletedNoticeTimer) {
+        clearTimeout(adminDeletedNoticeTimer);
+        adminDeletedNoticeTimer = null;
+    }
+}
+
+function hideAdminDeletedNotice() {
+    const notice = document.getElementById("adminDeletedNotice");
+    if (!notice) return;
+    notice.style.opacity = "0";
+    notice.style.display = "none";
+}
+
+function syncConversationTitleToBackend(conversation) {
+    if (!socket || socket.readyState !== WebSocket.OPEN || !conversation) return;
+    try {
+        socket.send(JSON.stringify({
+            type: "conversation_title_sync",
+            username: getCurrentUsername(),
+            conversation_id: conversation.id,
+            title: conversation.title || "未命名对话",
+        }));
+    } catch (_error) {
+        // 标题同步失败不影响正常聊天。
+    }
+}
+
+function collectLocalConversationsForBackend() {
+    return readConversations().map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title || DEFAULT_CONVERSATION_TITLE,
+        createdAt: conversation.createdAt || Date.now(),
+        updatedAt: conversation.updatedAt || Date.now(),
+        messages: readChatHistory(conversation.id).map((item) => ({
+            role: item.role,
+            text: item.text,
+            time: item.time || Date.now(),
+        })),
+    }));
+}
+
+function syncLocalConversationsToBackend() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const conversations = collectLocalConversationsForBackend();
+    if (conversations.length === 0) return;
+    socket.send(JSON.stringify({
+        type: "client_conversations_sync",
+        username: getCurrentUsername(),
+        conversations,
+    }));
+}
+
+function requestConversationList() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({
+        type: "conversation_list_request",
+        username: getCurrentUsername(),
+    }));
+}
+
+function requestConversationHistory(conversationId = activeConversationId) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!conversationId || activeConversationIsDraft) return;
+    socket.send(JSON.stringify({
+        type: "conversation_history_request",
+        username: getCurrentUsername(),
+        conversation_id: conversationId,
+    }));
+}
+
+function applyBackendConversationList(conversations) {
+    if (!Array.isArray(conversations)) return;
+    const backendConversations = conversations.map((conversation) => ({
+        id: String(conversation.id || conversation.conversation_id || ""),
+        title: conversation.title || DEFAULT_CONVERSATION_TITLE,
+        createdAt: conversation.createdAt || Date.now(),
+        updatedAt: conversation.updatedAt || Date.now(),
+    })).filter((conversation) => conversation.id);
+
+    // SQLite 是主数据源。只有后端返回非空列表时才覆盖本地缓存；
+    // 如果后端临时返回空，则保留本地，避免页面闪空。
+    if (backendConversations.length === 0) {
+        renderConversationSelect();
+        loadChatHistory();
+        return;
+    }
+
+    const merged = backendConversations
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    saveConversations(merged);
+
+    if (!activeConversationIsDraft) {
+        const stillExists = merged.some((conversation) => conversation.id === activeConversationId);
+        if (!stillExists) {
+            if (merged.length > 0) {
+                activeConversationId = merged[0].id;
+                activeConversationIsDraft = false;
+                localStorage.setItem(getActiveConversationKey(), activeConversationId);
+            } else {
+                activeConversationId = "";
+                activeConversationIsDraft = true;
+                localStorage.removeItem(getActiveConversationKey());
+            }
+        }
+    }
+
+    renderConversationSelect();
+    loadChatHistory();
+    requestConversationHistory(activeConversationId);
+}
+
+function applyBackendConversationHistory(data) {
+    const conversationId = data.conversation_id || activeConversationId;
+    if (!conversationId || !Array.isArray(data.messages)) return;
+    const backendMessages = data.messages.map((item) => ({
+        role: item.role === "assistant" ? "bot" : item.role,
+        text: item.text || item.content || "",
+        time: item.time || Date.now(),
+    })).filter((item) => item.role && item.text);
+
+    // 同理：后端空历史不能覆盖本地非空历史，避免刚迁移/刚启动时记录被清空。
+    const localMessages = readChatHistory(conversationId);
+    if (backendMessages.length === 0 && localMessages.length > 0) {
+        return;
+    }
+
+    // 本地刚发出的第一句话，可能比后端历史响应更早出现。
+    // 因此这里做“合并”，不能用后端历史直接覆盖本地历史。
+    const mergedMessages = localMessages.length > 0
+        ? mergeChatHistories(localMessages, backendMessages)
+        : backendMessages;
+
+    saveChatHistory(mergedMessages, conversationId);
+    if (conversationId === activeConversationId) {
+        loadChatHistory();
+    }
+}
+
+function mergeChatHistories(localMessages, backendMessages) {
+    const merged = [...localMessages];
+    const seen = new Set(localMessages.map((item) => `${item.role}\u0000${item.text}`));
+    backendMessages.forEach((item) => {
+        const key = `${item.role}\u0000${item.text}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        merged.push(item);
+    });
+    return merged.slice(-MAX_CHAT_HISTORY_ITEMS);
+}
+
+function getAdminDeleteAllKey() {
+    return `${ADMIN_DELETE_ALL_PREFIX}:${getCurrentUsername()}`;
+}
+
+function getAdminDeleteUserKey() {
+    return `${ADMIN_DELETE_USER_PREFIX}:${getCurrentUsername()}`;
+}
+
+function readChatHistory(conversationId = activeConversationId) {
+    if (!conversationId) return [];
+    try {
+        const raw = localStorage.getItem(getChatHistoryKey(conversationId));
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (_error) {
+        return [];
+    }
+}
+
+function saveChatHistory(history, conversationId = activeConversationId) {
+    if (!conversationId) return;
+    const trimmed = history.slice(-MAX_CHAT_HISTORY_ITEMS);
+    localStorage.setItem(getChatHistoryKey(conversationId), JSON.stringify(trimmed));
+}
+
+function deleteLocalConversation(conversationId) {
+    const existingConversations = readConversations();
+    if (conversationId === LEGACY_CONVERSATION_ID) {
+        localStorage.removeItem(getLegacyChatHistoryKey());
+        const hasStableLegacyConversation = existingConversations.some((item) => item.id === LEGACY_CONVERSATION_ID);
+        if (!hasStableLegacyConversation && existingConversations.length === 1) {
+            clearLocalConversationsForCurrentUser();
+            return;
+        }
+    }
+
+    const conversations = existingConversations.filter((item) => item.id !== conversationId);
+    saveConversations(conversations);
+    localStorage.removeItem(getChatHistoryKey(conversationId));
+
+    if (activeConversationId === conversationId) {
+        if (conversations.length > 0) {
+            activeConversationId = conversations[0].id;
+            activeConversationIsDraft = false;
+            localStorage.setItem(getActiveConversationKey(), activeConversationId);
+        } else {
+            activeConversationId = "";
+            activeConversationIsDraft = true;
+            localStorage.removeItem(getActiveConversationKey());
+        }
+    }
+}
+
+function clearLocalConversationsForCurrentUser() {
+    const conversations = readConversations();
+    conversations.forEach((conversation) => {
+        localStorage.removeItem(getChatHistoryKey(conversation.id));
+    });
+    localStorage.removeItem(getConversationMetaKey());
+    localStorage.removeItem(getActiveConversationKey());
+    activeConversationId = "";
+    activeConversationIsDraft = true;
+}
+
+function pruneLocalConversationsByBackend(existingIds) {
+    if (!Array.isArray(existingIds)) return false;
+    if (existingIds.length === 0) return false;
+
+    const validIds = new Set(existingIds.map((item) => String(item)));
+    const conversations = readConversations();
+    if (conversations.length === 0) return false;
+
+    const removedConversations = conversations.filter((item) => !validIds.has(item.id));
+    if (removedConversations.length === 0) return false;
+
+    const keptConversations = conversations.filter((item) => validIds.has(item.id));
+    removedConversations.forEach((conversation) => {
+        localStorage.removeItem(getChatHistoryKey(conversation.id));
+        if (conversation.id === LEGACY_CONVERSATION_ID) {
+            localStorage.removeItem(getLegacyChatHistoryKey());
+        }
+    });
+
+    saveConversations(keptConversations);
+
+    if (!keptConversations.some((item) => item.id === activeConversationId)) {
+        if (keptConversations.length > 0) {
+            activeConversationId = keptConversations[0].id;
+            activeConversationIsDraft = false;
+            localStorage.setItem(getActiveConversationKey(), activeConversationId);
+        } else {
+            activeConversationId = "";
+            activeConversationIsDraft = true;
+            localStorage.removeItem(getActiveConversationKey());
+        }
+    }
+
+    return true;
+}
+
+function applyAdminDeleteState(data) {
+    const deleteAllAt = data.delete_all_at ? String(data.delete_all_at) : "";
+    if (deleteAllAt && localStorage.getItem(getAdminDeleteAllKey()) !== deleteAllAt) {
+        clearLocalConversationsForCurrentUser();
+        localStorage.setItem(getAdminDeleteAllKey(), deleteAllAt);
+        renderConversationSelect();
+        loadChatHistory();
+        updateStatus("后台已一键删除全部数据，当前进入未保存的新对话");
+        return;
+    }
+
+    const userDeletedMarker = data.user_deleted_at
+        ? String(data.user_deleted_at)
+        : (data.user_deleted ? "legacy" : "");
+    if (userDeletedMarker && localStorage.getItem(getAdminDeleteUserKey()) !== userDeletedMarker) {
+        clearLocalConversationsForCurrentUser();
+        localStorage.setItem(getAdminDeleteUserKey(), userDeletedMarker);
+        renderConversationSelect();
+        loadChatHistory();
+        updateStatus("后台已删除该用户数据，当前进入未保存的新对话");
+        return;
+    }
+
+    const pruned = pruneLocalConversationsByBackend(data.existing_conversation_ids);
+    if (pruned) {
+        renderConversationSelect();
+        loadChatHistory();
+        updateStatus("已清理本地残留的旧对话");
+    }
+
+    const deletedIds = Array.isArray(data.deleted_conversation_ids) ? data.deleted_conversation_ids : [];
+    if (deletedIds.length === 0) return;
+    const activeConversationWasDeleted = deletedIds.includes(activeConversationId);
+    if (activeConversationWasDeleted) {
+        showAdminDeletedNotice("该对话已被管理删除");
+    }
+    deletedIds.forEach(deleteLocalConversation);
+    renderConversationSelect();
+    loadChatHistory();
+    updateStatus("已同步后台删除的对话");
+}
+
+function requestAdminDeleteState() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const session = getCurrentSession();
+    socket.send(JSON.stringify({
+        type: "admin_delete_state_request",
+        username: session.username || "guest",
+    }));
+}
+
+function persistMessage(role, text) {
+    persistMessageToConversation(role, text, activeConversationId);
+}
+
+function persistMessageToConversation(role, text, conversationId) {
+    const history = readChatHistory(conversationId);
+    history.push({
+        role,
+        text,
+        time: Date.now(),
+    });
+    saveChatHistory(history, conversationId);
+}
+
+function loadChatHistory() {
+    chatWindow.innerHTML = "";
+    const history = readChatHistory();
+    history.forEach((item) => {
+        if (!item || !item.role || !item.text) return;
+        appendMessage(item.role, item.text, {persist: false});
+    });
+}
+
+function appendMessage(role, text, options = {}) {
+    const shouldPersist = options.persist !== false;
     const div = document.createElement("div");
     div.className = `msg ${role}`;
     div.textContent = `${role === "user" ? "你" : "数字人"}：${text}`;
     chatWindow.appendChild(div);
     chatWindow.scrollTop = chatWindow.scrollHeight;
+    if (shouldPersist && (role === "user" || role === "bot")) {
+        persistMessage(role, text);
+    }
 }
 
 function createEmotionRows() {
@@ -293,10 +941,24 @@ function connectWebSocket() {
 
     socket.onopen = () => {
         console.log("[前端] WebSocket 已连接");
+        const session = getCurrentSession();
         socket.send(JSON.stringify({
             type: "join",
             role: "web_client",
+            username: session.username || "guest",
+            user_role: session.role || "user",
+            conversation_id: activeConversationId,
         }));
+        // SQLite 现在是唯一主数据源，不再自动把浏览器旧缓存导入后端。
+        // 否则旧 localStorage 里的历史对话会被误认为是真实新对话。
+        requestConversationList();
+        requestConversationHistory(activeConversationId);
+        requestAdminDeleteState();
+        if (adminDeletePollTimer) {
+            clearInterval(adminDeletePollTimer);
+        }
+        // 启动器的后台删除是写本地文件；前端定时询问后端，才能在不刷新页面时同步删除结果。
+        adminDeletePollTimer = setInterval(requestAdminDeleteState, 1500);
         flushFrontendLogs();
     };
 
@@ -314,13 +976,34 @@ function connectWebSocket() {
             return;
         }
 
+        if (data.type === "client_conversations_synced") {
+            console.log("[前端] 本地对话已同步到后端，导入数：", data.imported);
+            return;
+        }
+
+        if (data.type === "conversation_list") {
+            applyBackendConversationList(data.conversations);
+            return;
+        }
+
+        if (data.type === "conversation_history") {
+            applyBackendConversationHistory(data);
+            return;
+        }
+
         if (data.type === "bot_reply") {
             const text = data.text || "";
             const audioPath = data.audio;
+            const replyConversationId = data.conversation_id || activeConversationId;
             console.log("[前端] 收到AI回复：", text);
-            appendMessage("bot", text);
+            if (replyConversationId === activeConversationId) {
+                appendMessage("bot", text);
+            } else {
+                persistMessageToConversation("bot", text, replyConversationId);
+            }
+            requestConversationList();
 
-            if (audioPath) {
+            if (audioPath && replyConversationId === activeConversationId) {
                 playAiAudio(audioPath);
             } else {
                 console.log("[前端] 本次回复没有音频，跳过播放");
@@ -330,6 +1013,11 @@ function connectWebSocket() {
                     setTimeout(startNextListeningCycle, 500);
                 }
             }
+            return;
+        }
+
+        if (data.type === "admin_delete_state") {
+            applyAdminDeleteState(data);
             return;
         }
 
@@ -348,6 +1036,10 @@ function connectWebSocket() {
 
     socket.onclose = () => {
         console.log("[前端] WebSocket 已关闭");
+        if (adminDeletePollTimer) {
+            clearInterval(adminDeletePollTimer);
+            adminDeletePollTimer = null;
+        }
         emotionRequestInFlight = false;
         updateStatus("连接已断开");
         updateEmotionStatus("后端连接已断开，情绪识别暂停");
@@ -522,15 +1214,22 @@ function sendUserText() {
     if (!text) return;
 
     console.log("[前端] 发送用户消息：", text);
+    ensureActiveConversationSaved(text);
     appendMessage("user", text);
+    updateActiveConversationTitle(text);
     userTextInput.value = "";
 
     if (socket && socket.readyState === WebSocket.OPEN) {
+        const webSearchEnabled = Boolean(webSearchToggle?.checked);
         socket.send(JSON.stringify({
             type: "user_text",
             text,
+            username: getCurrentUsername(),
+            user_role: getCurrentSession().role || "user",
+            conversation_id: activeConversationId,
+            web_search: webSearchEnabled,
         }));
-        updateStatus("AI 正在思考...");
+        updateStatus(webSearchEnabled ? "AI 正在联网搜索..." : "AI 正在思考...");
         conversationState = "ai_thinking";
         return;
     }
@@ -586,6 +1285,31 @@ voiceBtn.addEventListener("click", () => {
 
 sendBtn.addEventListener("click", sendUserText);
 
+if (conversationSelect) {
+    conversationSelect.addEventListener("change", () => {
+        setActiveConversation(conversationSelect.value);
+    });
+}
+
+if (newConversationBtn) {
+    newConversationBtn.addEventListener("click", createNewConversation);
+}
+
+if (webSearchToggle) {
+    webSearchToggle.addEventListener("change", updateWebSearchLabel);
+}
+
+if (logoutBtn) {
+    logoutBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (window.DigitalHumanAuth) {
+            window.DigitalHumanAuth.logout();
+        } else {
+            window.location.href = "login.html";
+        }
+    });
+}
+
 userTextInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
         event.preventDefault();
@@ -598,14 +1322,21 @@ window.addEventListener("load", async () => {
     avatarVideo.poster = "avatar.png";
     createEmotionRows();
     resetEmotionPanel();
+    updateWebSearchLabel();
+    ensureConversationState();
+    loadChatHistory();
     initSpeechRecognition();
-    updateStatus("可打字发送，或点击语音开始通话");
+    updateStatus(`${getCurrentUsername()}，可打字发送，或点击语音开始通话`);
     connectWebSocket();
     await startEmotionCamera();
 });
 
 window.addEventListener("beforeunload", () => {
     stopEmotionCamera();
+    if (adminDeletePollTimer) {
+        clearInterval(adminDeletePollTimer);
+        adminDeletePollTimer = null;
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.close();
     }

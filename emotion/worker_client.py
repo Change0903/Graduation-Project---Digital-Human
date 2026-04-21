@@ -17,6 +17,7 @@ class EmotionWorkerClient:
         self.stderr_task: asyncio.Task | None = None
         self.write_lock = asyncio.Lock()
         self.start_lock = asyncio.Lock()
+        self.response_timeout_seconds = 45
 
     async def ensure_started(self) -> None:
         if self.process is not None and self.process.returncode is None:
@@ -89,7 +90,7 @@ class EmotionWorkerClient:
             await self.process.stdin.drain()
 
         try:
-            result = await asyncio.wait_for(future, timeout=12)
+            result = await asyncio.wait_for(future, timeout=self.response_timeout_seconds)
             return result
         finally:
             self.pending.pop(request_id, None)
